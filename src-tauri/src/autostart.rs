@@ -33,6 +33,7 @@ pub fn set_auto_start(enabled: bool) -> Result<()> {
 #[cfg(target_os = "macos")]
 pub fn set_auto_start(enabled: bool) -> Result<()> {
     use std::fs;
+    use std::path::PathBuf;
 
     let exe = std::env::current_exe()
         .map_err(|e| anyhow!("无法获取程序路径: {}", e))?;
