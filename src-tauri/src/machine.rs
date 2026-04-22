@@ -507,6 +507,50 @@ pub struct TraeLoginInfo {
     pub region: String,
 }
 
+fn canonicalize_trae_region(region: &str) -> String {
+    let upper = region.trim().to_ascii_uppercase();
+    if upper.is_empty() {
+        return "SG".to_string();
+    }
+
+    if upper.starts_with("US") || upper.contains("USEAST") {
+        "US".to_string()
+    } else if upper.starts_with("JP") || upper.contains("APJPN") {
+        "JP".to_string()
+    } else if upper.starts_with("CN") {
+        "CN".to_string()
+    } else if upper.starts_with("SG") || upper.contains("ALISG") {
+        "SG".to_string()
+    } else {
+        upper
+    }
+}
+
+fn resolve_trae_host(host: &str, canonical_region: &str) -> String {
+    let trimmed_host = host.trim();
+    if !trimmed_host.is_empty() {
+        return trimmed_host.trim_end_matches('/').to_string();
+    }
+
+    match canonical_region {
+        "US" => "https://api-us-east.trae.ai".to_string(),
+        "CN" => "https://api.trae.com.cn".to_string(),
+        // 日本区域当前复用 SG API 基础域名，与现有 API 客户端逻辑保持一致。
+        "JP" | "SG" => "https://api-sg-central.trae.ai".to_string(),
+        _ => "https://api-sg-central.trae.ai".to_string(),
+    }
+}
+
+fn resolve_store_country_code(canonical_region: &str) -> &'static str {
+    match canonical_region {
+        "US" => "us",
+        "JP" => "jp",
+        "SG" => "sg",
+        "CN" => "cn",
+        _ => "cn",
+    }
+}
+
 /// 将账号登录信息写入 Trae IDE
 pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
     let trae_path = get_trae_data_path()?;
@@ -535,16 +579,9 @@ pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
     let expired_at = now + chrono::Duration::days(14);
     let refresh_expired_at = now + chrono::Duration::days(180);
 
-    // 构建 host URL
-    let host = if info.host.is_empty() {
-        match info.region.to_uppercase().as_str() {
-            "SG" => "https://api-sg-central.trae.ai",
-            "CN" => "https://api.trae.com.cn",
-            _ => "https://api-sg-central.trae.ai",
-        }
-    } else {
-        &info.host
-    };
+    let canonical_region = canonicalize_trae_region(&info.region);
+    let host = resolve_trae_host(&info.host, &canonical_region);
+    let store_country_code = resolve_store_country_code(&canonical_region);
 
     // 构建 iCubeAuthInfo
     let auth_info = serde_json::json!({
@@ -556,8 +593,8 @@ pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
         "userId": info.user_id,
         "host": host,
         "userRegion": {
-            "region": info.region.to_uppercase(),
-            "_aiRegion": info.region.to_uppercase()
+            "region": canonical_region,
+            "_aiRegion": canonical_region
         },
         "account": {
             "username": info.username,
@@ -570,9 +607,9 @@ pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
             "description": "",
             "scope": "marscode",
             "loginScope": "trae",
-            "storeCountryCode": "cn",
+            "storeCountryCode": store_country_code,
             "storeCountrySrc": "uid",
-            "storeRegion": info.region.to_uppercase(),
+            "storeRegion": canonical_region,
             "userTag": "row"
         }
     });

@@ -28,7 +28,7 @@ use uuid::Uuid;
 use warp::Filter;
 
 use account::{AccountBrief, AccountManager, Account};
-use api::{TraeApiClient, UsageSummary, UsageQueryResponse, UserStatisticResult};
+use api::{TraeApiClient, UsageSummary, UsageQueryResponse, UserStatisticResult, is_auth_expired_error_message};
 
 #[cfg(target_os = "windows")]
 fn hide_console_window() {
@@ -1482,7 +1482,7 @@ async fn fetch_usage_for_account(account: &Account) -> anyhow::Result<(UsageSumm
             Err(e) => {
                 let error_msg = e.to_string();
                 // 如果是 401 错误且有 Cookies，尝试刷新 Token
-                if error_msg.contains("401") && !account.cookies.is_empty() {
+                if is_auth_expired_error_message(&error_msg) && !account.cookies.is_empty() {
                     // 使用 Cookies 刷新 Token
                     let mut cookie_client = TraeApiClient::new(&account.cookies)?;
                     let token_result = cookie_client.get_user_token().await?;
@@ -1492,7 +1492,7 @@ async fn fetch_usage_for_account(account: &Account) -> anyhow::Result<(UsageSumm
                     // 使用新 Token 重新获取使用量
                     let new_client = TraeApiClient::new_with_token(&token_result.token)?;
                     new_client.get_usage_summary_by_token().await?
-                } else if error_msg.contains("401") {
+                } else if is_auth_expired_error_message(&error_msg) {
                     return Err(anyhow::anyhow!("Token 已过期，请更新 Token 或 Cookies"));
                 } else {
                     return Err(e);
@@ -2449,34 +2449,85 @@ fn normalize_request_url(url: &str) -> Option<Url> {
         .ok()
 }
 
+fn is_token_expired(expired_at: Option<&str>) -> bool {
+    match expired_at.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(value) => chrono::DateTime::parse_from_rfc3339(value)
+            .map(|dt| dt.with_timezone(&chrono::Utc) <= chrono::Utc::now())
+            .unwrap_or(true),
+        None => false,
+    }
+}
+
 async fn handle_silent_start() -> anyhow::Result<()> {
     let mut manager = AccountManager::new()?;
     
     // 1. Refresh all accounts
     let account_ids: Vec<String> = manager.get_accounts().into_iter().map(|a| a.id).collect();
     for id in account_ids {
-        let _ = manager.refresh_token(&id).await;
+        if let Err(err) = manager.refresh_token(&id).await {
+            println!("[WARN] 静默启动刷新账号失败 ({}): {}", id, err);
+        }
     }
 
     // 2. Sync with Trae IDE if it's not running
     if !machine::is_trae_running() {
         let accounts = manager.get_accounts();
         if let Some(current) = accounts.iter().find(|a| a.is_current) {
+             let resolved_region = manager.ensure_account_region(&current.id).await.unwrap_or_default();
              if let Ok(account) = manager.get_account(&current.id) {
-                if let Some(token) = account.jwt_token {
-                     let login_info = machine::TraeLoginInfo {
-                        token,
-                        refresh_token: None,
-                        user_id: account.user_id,
-                        email: account.email,
-                        username: account.name,
-                        avatar_url: account.avatar_url,
-                        host: String::new(),
-                        region: if account.region.is_empty() { "SG".to_string() } else { account.region },
-                    };
-                    let _ = machine::write_trae_login_info(&login_info);
+                let token = match account.jwt_token.clone().filter(|v| !v.trim().is_empty()) {
+                    Some(token) => token,
+                    None => {
+                        println!("[WARN] 静默同步跳过：当前账号缺少有效 Token");
+                        return Ok(());
+                    }
+                };
+
+                if is_token_expired(account.token_expired_at.as_deref()) {
+                    println!("[WARN] 静默同步跳过：当前账号 Token 已过期，避免写回失效登录态");
+                    return Ok(());
                 }
-             }
+
+                if account.token_expired_at.is_none() {
+                    match TraeApiClient::new_with_token(&token) {
+                        Ok(client) => {
+                            if let Err(err) = client.validate_token_alive().await {
+                                println!(
+                                    "[WARN] 静默同步跳过：当前账号 Token 缺少过期时间且服务端校验失败，避免写回失效登录态: {}",
+                                    err
+                                );
+                                return Ok(());
+                            }
+                        }
+                        Err(err) => {
+                            println!(
+                                "[WARN] 静默同步跳过：当前账号 Token 格式无效，避免写回失效登录态: {}",
+                                err
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+
+                if resolved_region.is_empty() {
+                    println!("[WARN] 静默同步跳过：无法确定账号区域，避免写入默认区域导致区服不一致");
+                    return Ok(());
+                }
+
+                let login_info = machine::TraeLoginInfo {
+                    token,
+                    refresh_token: None,
+                    user_id: account.user_id,
+                    email: account.email,
+                    username: account.name,
+                    avatar_url: account.avatar_url,
+                    host: String::new(),
+                    region: resolved_region,
+                };
+                if let Err(err) = machine::write_trae_login_info(&login_info) {
+                    println!("[WARN] 静默同步写入 Trae 登录态失败: {}", err);
+                }
+            }
         }
     }
 

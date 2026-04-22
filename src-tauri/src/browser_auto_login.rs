@@ -525,11 +525,6 @@ pub async fn browser_auto_login(
     println!("[browser-auto-login] Token 前50字符: {}", &token[..token.len().min(50)]);
     println!("[browser-auto-login] Token 包含的点数: {}", token.matches('.').count());
     
-    // 使用 token 创建客户端并获取用户信息
-    println!("[browser-auto-login] 获取账号信息...");
-    let client = TraeApiClient::new_with_token(&token)?;
-    let _user_info = client.get_user_info_by_token().await?;
-    
     // 保存账号
     println!("[browser-auto-login] 保存账号...");
     let mut manager = state.account_manager.lock().await;

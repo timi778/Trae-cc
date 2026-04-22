@@ -4,7 +4,129 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use super::types::*;
-use crate::api::{TraeApiClient, UsageSummary, UsageQueryResponse, login_with_email, TokenUserInfo};
+use crate::api::{TraeApiClient, UsageSummary, UsageQueryResponse, is_auth_expired_error_message, login_with_email};
+
+fn canonicalize_stored_region(region: &str) -> String {
+    let upper = region.trim().to_ascii_uppercase();
+    if upper.is_empty() {
+        return String::new();
+    }
+
+    if upper.starts_with("US") || upper.contains("USEAST") {
+        "US".to_string()
+    } else if upper.starts_with("JP") || upper.contains("APJPN") {
+        "JP".to_string()
+    } else if upper.starts_with("CN") || upper.contains("CNNORTH") {
+        "CN".to_string()
+    } else if upper.starts_with("SG") || upper.contains("ALISG") {
+        "SG".to_string()
+    } else {
+        upper
+    }
+}
+
+fn infer_region_from_host(host: &str) -> String {
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() {
+        return String::new();
+    }
+
+    if host.contains("api-us-east.trae.ai") || host.contains("useast") {
+        "US".to_string()
+    } else if host.contains("api.trae.com.cn") || host.contains(".com.cn") {
+        "CN".to_string()
+    } else if host.contains("apjpn") {
+        "JP".to_string()
+    } else if host.contains("api-sg-central.trae.ai")
+        || host.contains("ug-normal.trae.ai")
+        || host.contains("alisg")
+    {
+        "SG".to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn extract_region_from_auth_info(auth_info: &serde_json::Value) -> String {
+    let candidates = [
+        auth_info
+            .get("userRegion")
+            .and_then(|v| v.get("region"))
+            .and_then(|v| v.as_str()),
+        auth_info
+            .get("userRegion")
+            .and_then(|v| v.get("_aiRegion"))
+            .and_then(|v| v.as_str()),
+        auth_info
+            .get("account")
+            .and_then(|v| v.get("storeRegion"))
+            .and_then(|v| v.as_str()),
+        auth_info
+            .get("account")
+            .and_then(|v| v.get("storeCountryCode"))
+            .and_then(|v| v.as_str()),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        let region = canonicalize_stored_region(candidate);
+        if !region.is_empty() {
+            return region;
+        }
+    }
+
+    auth_info
+        .get("host")
+        .and_then(|v| v.as_str())
+        .map(infer_region_from_host)
+        .unwrap_or_default()
+}
+
+fn read_local_trae_auth_info() -> Result<serde_json::Value> {
+    #[cfg(target_os = "windows")]
+    let trae_data_path = {
+        let appdata = std::env::var("APPDATA")
+            .map_err(|_| anyhow!("无法获取 APPDATA 环境变量"))?;
+        PathBuf::from(appdata).join("Trae")
+    };
+
+    #[cfg(target_os = "macos")]
+    let trae_data_path = {
+        let home = std::env::var("HOME")
+            .map_err(|_| anyhow!("无法获取 HOME 环境变量"))?;
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("Trae")
+    };
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let trae_data_path: PathBuf = {
+        return Err(anyhow!("此功能仅支持 Windows 和 macOS 系统"));
+    };
+
+    let storage_path = trae_data_path
+        .join("User")
+        .join("globalStorage")
+        .join("storage.json");
+
+    if !storage_path.exists() {
+        return Err(anyhow!("Trae IDE 配置文件不存在"));
+    }
+
+    let content = fs::read_to_string(&storage_path)
+        .map_err(|e| anyhow!("读取 Trae IDE 配置文件失败: {}", e))?;
+
+    let storage: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow!("解析 Trae IDE 配置文件失败: {}", e))?;
+
+    let auth_info_str = storage
+        .get("iCubeAuthInfo://icube.cloudide")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("未找到 Trae IDE 登录信息"))?;
+
+    serde_json::from_str(auth_info_str)
+        .map_err(|e| anyhow!("解析 Trae IDE 认证信息失败: {}", e))
+}
 
 /// 账号管理器
 pub struct AccountManager {
@@ -23,6 +145,11 @@ impl AccountManager {
         for account in &mut store.accounts {
             if account.machine_id.is_none() {
                 account.machine_id = Some(Uuid::new_v4().to_string());
+                changed = true;
+            }
+            let normalized_region = canonicalize_stored_region(&account.region);
+            if normalized_region != account.region {
+                account.region = normalized_region;
                 changed = true;
             }
         }
@@ -241,24 +368,8 @@ impl AccountManager {
         
         let client = TraeApiClient::new_with_token(&token)?;
 
-        // 通过 Token 获取用户信息，增加容错和日志
-        let user_info = match client.get_user_info_by_token().await {
-            Ok(info) => {
-                println!("[AccountManager] ✅ API 成功获取用户信息: {}", info.user_id);
-                info
-            },
-            Err(err) => {
-                println!("[AccountManager] ⚠️ API 获取用户信息失败 (可能是 401), 使用 Token 强制解析: {}", err);
-                let jwt = TraeApiClient::parse_jwt_token(&token)?;
-                TokenUserInfo {
-                    user_id: jwt.user_id,
-                    tenant_id: jwt.tenant_id,
-                    screen_name: None,
-                    avatar_url: None,
-                    email: None,
-                }
-            }
-        };
+        // 新增账号时允许身份读取兜底，避免因为验活失败丢失本地导入能力。
+        let user_info = client.get_user_identity_by_token().await?;
 
         println!("[AccountManager] 目标用户 ID: {}", user_info.user_id);
 
@@ -397,21 +508,7 @@ impl AccountManager {
         println!("[AccountManager] 开始 upsert_account_by_token, token 长度: {}", token.len());
         let client = TraeApiClient::new_with_token(&token)?;
         
-        // 尝试获取用户信息，如果失败则使用 JWT 兜底
-        let user_info = match client.get_user_info_by_token().await {
-            Ok(info) => info,
-            Err(err) => {
-                println!("[AccountManager] API 获取用户信息失败，使用 Token 强制解析: {}", err);
-                let jwt = TraeApiClient::parse_jwt_token(&token)?;
-                TokenUserInfo {
-                    user_id: jwt.user_id,
-                    tenant_id: jwt.tenant_id,
-                    screen_name: None,
-                    avatar_url: None,
-                    email: None,
-                }
-            }
-        };
+        let user_info = client.get_user_identity_by_token().await?;
 
         println!("[AccountManager] 目标用户 ID: {}", user_info.user_id);
 
@@ -512,6 +609,68 @@ impl AccountManager {
         client.get_user_info().await
     }
 
+    fn get_region_from_local_trae_auth_for_user(&self, user_id: &str) -> Option<String> {
+        let auth_info = read_local_trae_auth_info().ok()?;
+        let auth_user_id = auth_info
+            .get("userId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if auth_user_id != user_id {
+            return None;
+        }
+
+        let region = extract_region_from_auth_info(&auth_info);
+        if region.is_empty() {
+            None
+        } else {
+            Some(region)
+        }
+    }
+
+    pub async fn ensure_account_region(&mut self, account_id: &str) -> Result<String> {
+        let account = self.store.accounts.iter()
+            .find(|a| a.id == account_id)
+            .ok_or_else(|| anyhow!("账号不存在"))?
+            .clone();
+
+        let normalized_existing = canonicalize_stored_region(&account.region);
+        if !normalized_existing.is_empty() {
+            if normalized_existing != account.region {
+                if let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == account_id) {
+                    acc.region = normalized_existing.clone();
+                    acc.updated_at = chrono::Utc::now().timestamp();
+                }
+                self.save_store()?;
+            }
+            return Ok(normalized_existing);
+        }
+
+        let mut resolved_region = String::new();
+
+        if !account.cookies.trim().is_empty() {
+            if let Ok(user_info) = self.get_user_info_with_cookies(&account.cookies).await {
+                resolved_region = canonicalize_stored_region(&user_info.region);
+            }
+        }
+
+        if resolved_region.is_empty() {
+            resolved_region = self
+                .get_region_from_local_trae_auth_for_user(&account.user_id)
+                .unwrap_or_default();
+        }
+
+        if !resolved_region.is_empty() {
+            if let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == account_id) {
+                acc.region = resolved_region.clone();
+                acc.updated_at = chrono::Utc::now().timestamp();
+            }
+            self.save_store()?;
+        }
+
+        Ok(resolved_region)
+    }
+
     /// 添加账号（通过邮箱密码登录）
     /// 如果账号已存在，则更新账号信息
     pub async fn add_account_by_email(&mut self, email: String, password: String) -> Result<Account> {
@@ -528,9 +687,8 @@ impl AccountManager {
         if let Some(index) = existing_index {
             // 账号已存在，更新信息
             
-            // 使用 Token 获取完整的用户信息
-            let client = TraeApiClient::new_with_token(&login_result.token)?;
-            let user_info = client.get_user_info_by_token().await?;
+            // 邮箱登录已拿到 cookies，直接获取完整用户信息以保留 region。
+            let user_info = self.get_user_info_with_cookies(&login_result.cookies).await?;
             
             {
                 let existing_account = &mut self.store.accounts[index];
@@ -541,12 +699,17 @@ impl AccountManager {
                 if !email.trim().is_empty() {
                     existing_account.email = email;
                 }
-                if let Some(name) = user_info.screen_name {
+                if !user_info.region.trim().is_empty() {
+                    existing_account.region = user_info.region.clone();
+                }
+                if !user_info.screen_name.trim().is_empty() {
+                    let name = user_info.screen_name;
                     if !name.trim().is_empty() {
                         existing_account.name = name;
                     }
                 }
-                if let Some(avatar) = user_info.avatar_url {
+                if !user_info.avatar_url.trim().is_empty() {
+                    let avatar = user_info.avatar_url;
                     if !avatar.trim().is_empty() {
                         existing_account.avatar_url = avatar;
                     }
@@ -561,19 +724,23 @@ impl AccountManager {
             return Ok(self.store.accounts[index].clone());
         }
 
-        // 使用 Token 获取完整的用户信息
-        let client = TraeApiClient::new_with_token(&login_result.token)?;
-        let user_info = client.get_user_info_by_token().await?;
+        // 邮箱登录已拿到 cookies，直接获取完整用户信息以保留 region。
+        let user_info = self.get_user_info_with_cookies(&login_result.cookies).await?;
 
         let mut account = Account::new(
-            user_info.screen_name.unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string()),
+            if user_info.screen_name.trim().is_empty() {
+                email.split('@').next().unwrap_or("User").to_string()
+            } else {
+                user_info.screen_name.clone()
+            },
             email,
             login_result.cookies,
             login_result.user_id,
             login_result.tenant_id,
         );
 
-        account.avatar_url = user_info.avatar_url.unwrap_or_default();
+        account.avatar_url = user_info.avatar_url;
+        account.region = user_info.region;
         account.jwt_token = Some(login_result.token);
         account.token_expired_at = Some(login_result.expired_at);
         account.password = Some(password);
@@ -641,6 +808,10 @@ impl AccountManager {
             .find(|a| a.id == account_id)
             .ok_or_else(|| anyhow!("账号不存在"))?
             .clone();
+        let resolved_region = self.ensure_account_region(account_id).await?;
+        if resolved_region.is_empty() {
+            return Err(anyhow!("无法确定账号区域，已停止写入 Trae 登录态以避免触发“登录已失效”"));
+        }
 
         // 检查 Token 是否过期，如果过期则尝试刷新
         let token = if let Some(token) = &account.jwt_token {
@@ -704,7 +875,7 @@ impl AccountManager {
             username: account.name.clone(),
             avatar_url: account.avatar_url.clone(),
             host: String::new(), // 根据 region 自动选择
-            region: if account.region.is_empty() { "SG".to_string() } else { account.region.clone() },
+            region: resolved_region,
         };
 
         // 切换 Trae IDE 到该账号（清除旧登录状态并写入新账号信息，不自动启动）
@@ -789,7 +960,7 @@ impl AccountManager {
                 Err(e) => {
                     let error_msg = e.to_string();
                     // 如果是 401 错误且有 Cookies，尝试刷新 Token
-                    if error_msg.contains("401") && !account.cookies.is_empty() {
+                    if is_auth_expired_error_message(&error_msg) && !account.cookies.is_empty() {
                         // 使用 Cookies 刷新 Token
                         let mut cookie_client = TraeApiClient::new(&account.cookies)?;
                         let token_result = cookie_client.get_user_token().await?;
@@ -802,21 +973,26 @@ impl AccountManager {
                         self.save_store()?;
 
                         if self.store.current_account_id.as_deref() == Some(account_id) {
-                            let login_info = crate::machine::TraeLoginInfo {
-                                token: token_result.token.clone(),
-                                refresh_token: None,
-                                user_id: account.user_id.clone(),
-                                email: account.email.clone(),
-                                username: account.name.clone(),
-                                avatar_url: account.avatar_url.clone(),
-                                host: String::new(),
-                                region: if account.region.is_empty() { "SG".to_string() } else { account.region.clone() },
-                            };
+                            let resolved_region = self.ensure_account_region(account_id).await?;
+                            if resolved_region.is_empty() {
+                                println!("[WARN] 当前账号区域未知，跳过同步 Trae 登录态，避免写入默认区域触发“登录已失效”");
+                            } else {
+                                let login_info = crate::machine::TraeLoginInfo {
+                                    token: token_result.token.clone(),
+                                    refresh_token: None,
+                                    user_id: account.user_id.clone(),
+                                    email: account.email.clone(),
+                                    username: account.name.clone(),
+                                    avatar_url: account.avatar_url.clone(),
+                                    host: String::new(),
+                                    region: resolved_region,
+                                };
 
-                            let _ = crate::machine::write_trae_login_info(&login_info);
-                            if crate::machine::is_trae_running() {
-                                let _ = crate::machine::kill_trae();
-                                let _ = crate::machine::open_trae();
+                                let _ = crate::machine::write_trae_login_info(&login_info);
+                                if crate::machine::is_trae_running() {
+                                    let _ = crate::machine::kill_trae();
+                                    let _ = crate::machine::open_trae();
+                                }
                             }
                         }
 
@@ -824,7 +1000,7 @@ impl AccountManager {
                         // 使用新 Token 重新获取使用量
                         let new_client = TraeApiClient::new_with_token(&token_result.token)?;
                         new_client.get_usage_summary_by_token().await?
-                    } else if error_msg.contains("401") {
+                    } else if is_auth_expired_error_message(&error_msg) {
                         return Err(anyhow!("登录已过期，请重新登录此账号"));
                     } else {
                         return Err(e);
@@ -904,11 +1080,16 @@ impl AccountManager {
             return Err(anyhow!("登录账号与当前账号不匹配"));
         }
 
+        let user_info = self.get_user_info_with_cookies(&login_result.cookies).await?;
+
         if let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == account_id) {
             acc.cookies = login_result.cookies;
             acc.jwt_token = Some(login_result.token);
             acc.token_expired_at = Some(login_result.expired_at);
             acc.password = Some(password.to_string());
+            if !user_info.region.trim().is_empty() {
+                acc.region = user_info.region;
+            }
             acc.updated_at = chrono::Utc::now().timestamp();
         }
 
@@ -937,6 +1118,8 @@ impl AccountManager {
             return Err(anyhow!("登录账号与当前账号不匹配"));
         }
 
+        let user_info = self.get_user_info_with_cookies(&login_result.cookies).await?;
+
         let summary = TraeApiClient::new_with_token(&login_result.token)?
             .get_usage_summary_by_token()
             .await?;
@@ -948,6 +1131,9 @@ impl AccountManager {
             acc.jwt_token = Some(login_result.token);
             acc.token_expired_at = Some(login_result.expired_at);
             acc.tenant_id = login_result.tenant_id;
+            if !user_info.region.trim().is_empty() {
+                acc.region = user_info.region;
+            }
             acc.plan_type = summary.plan_type.clone();
             acc.updated_at = chrono::Utc::now().timestamp();
         }
@@ -965,7 +1151,7 @@ impl AccountManager {
         password: Option<String>,
     ) -> Result<()> {
         let client = TraeApiClient::new_with_token(&token)?;
-        let user_info = client.get_user_info_by_token().await?;
+        let user_info = client.validate_token_alive().await?;
 
         let acc = self.store.accounts.iter_mut()
             .find(|a| a.id == account_id)
@@ -1014,8 +1200,8 @@ impl AccountManager {
     pub async fn update_account_token(&mut self, account_id: &str, token: String) -> Result<UsageSummary> {
         let client = TraeApiClient::new_with_token(&token)?;
 
-        // 验证 Token 并获取用户信息
-        let user_info = client.get_user_info_by_token().await?;
+        // 严格校验 Token，避免把 JWT 身份解析误当成有效登录态。
+        let user_info = client.validate_token_alive().await?;
 
         // 查找账号
         let acc = self.store.accounts.iter_mut()
@@ -1161,20 +1347,25 @@ impl AccountManager {
                             match TraeApiClient::new_with_token(&login_result.token) {
                                 Ok(client) => {
                                     // 并行获取用户信息和用量
-                                    let user_info_future = client.get_user_info_by_token();
+                                    let user_info_future = self.get_user_info_with_cookies(&login_result.cookies);
                                     let usage_future = client.get_usage_summary_by_token();
                                     
                                     match tokio::join!(user_info_future, usage_future) {
                                         (Ok(user_info), Ok(usage)) => {
                                             let mut account = Account::new(
-                                                user_info.screen_name.unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string()),
+                                                if user_info.screen_name.trim().is_empty() {
+                                                    email.split('@').next().unwrap_or("User").to_string()
+                                                } else {
+                                                    user_info.screen_name.clone()
+                                                },
                                                 email.clone(),
                                                 login_result.cookies,
                                                 login_result.user_id,
                                                 login_result.tenant_id,
                                             );
                                             
-                                            account.avatar_url = user_info.avatar_url.unwrap_or_default();
+                                            account.avatar_url = user_info.avatar_url;
+                                            account.region = user_info.region;
                                             account.jwt_token = Some(login_result.token);
                                             account.token_expired_at = Some(login_result.expired_at);
                                             account.password = Some(password);
@@ -1188,14 +1379,19 @@ impl AccountManager {
                                         (Ok(user_info), Err(e)) => {
                                             // 获取用量失败，但仍创建账号
                                             let mut account = Account::new(
-                                                user_info.screen_name.unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string()),
+                                                if user_info.screen_name.trim().is_empty() {
+                                                    email.split('@').next().unwrap_or("User").to_string()
+                                                } else {
+                                                    user_info.screen_name.clone()
+                                                },
                                                 email.clone(),
                                                 login_result.cookies,
                                                 login_result.user_id,
                                                 login_result.tenant_id,
                                             );
                                             
-                                            account.avatar_url = user_info.avatar_url.unwrap_or_default();
+                                            account.avatar_url = user_info.avatar_url;
+                                            account.region = user_info.region;
                                             account.jwt_token = Some(login_result.token);
                                             account.token_expired_at = Some(login_result.expired_at);
                                             account.password = Some(password);
@@ -1265,7 +1461,7 @@ impl AccountManager {
                 Err(e) => {
                     let error_msg = e.to_string();
                     // 如果是 401 错误且有 Cookies，尝试刷新 Token
-                    if error_msg.contains("401") && !account.cookies.is_empty() {
+                    if is_auth_expired_error_message(&error_msg) && !account.cookies.is_empty() {
                         println!("[INFO] Token 已过期，尝试使用 Cookies 刷新...");
                         // 使用 Cookies 刷新 Token
                         let mut cookie_client = TraeApiClient::new(&account.cookies)?;
@@ -1281,7 +1477,7 @@ impl AccountManager {
                         // 使用新 Token 重新查询
                         let new_client = TraeApiClient::new_with_token(&token_result.token)?;
                         new_client.query_usage(start_time, end_time, page_size, page_num).await
-                    } else if error_msg.contains("401") {
+                    } else if is_auth_expired_error_message(&error_msg) {
                         Err(anyhow!("登录已过期，请重新登录此账号"))
                     } else {
                         Err(e)
@@ -1301,68 +1497,17 @@ impl AccountManager {
 
     /// 从 Trae IDE 读取当前登录账号
     pub async fn read_trae_ide_account(&mut self) -> Result<Option<Account>> {
-        // 获取 Trae IDE 配置文件路径（跨平台支持）
-        #[cfg(target_os = "windows")]
-        let trae_data_path = {
-            let appdata = std::env::var("APPDATA")
-                .map_err(|_| anyhow!("无法获取 APPDATA 环境变量"))?;
-            PathBuf::from(appdata).join("Trae")
+        let auth_info = match read_local_trae_auth_info() {
+            Ok(auth_info) => auth_info,
+            Err(err) if err.to_string().contains("Trae IDE 配置文件不存在") => return Ok(None),
+            Err(err) => return Err(err),
         };
-        
-        #[cfg(target_os = "macos")]
-        let trae_data_path = {
-            let home = std::env::var("HOME")
-                .map_err(|_| anyhow!("无法获取 HOME 环境变量"))?;
-            PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("Trae")
-        };
-        
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        let trae_data_path: PathBuf = {
-            return Err(anyhow!("此功能仅支持 Windows 和 macOS 系统"));
-        };
-
-        let storage_path = trae_data_path
-            .join("User")
-            .join("globalStorage")
-            .join("storage.json");
-
-        // 检查文件是否存在
-        if !storage_path.exists() {
-            return Ok(None);
-        }
-
-        // 读取文件内容
-        let content = fs::read_to_string(&storage_path)
-            .map_err(|e| anyhow!("读取 Trae IDE 配置文件失败: {}", e))?;
-
-        // 解析 JSON
-        let storage: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| anyhow!("解析 Trae IDE 配置文件失败: {}", e))?;
-
-        // 获取 iCubeAuthInfo 字段
-        let auth_info_str = storage
-            .get("iCubeAuthInfo://icube.cloudide")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("未找到 Trae IDE 登录信息"))?;
-
-        // 解析嵌套的 JSON 字符串
-        let auth_info: serde_json::Value = serde_json::from_str(auth_info_str)
-            .map_err(|e| anyhow!("解析 Trae IDE 认证信息失败: {}", e))?;
 
         // 提取账号信息
         let token = auth_info
             .get("token")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("未找到 Token"))?
-            .to_string();
-
-        let user_id = auth_info
-            .get("userId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("未找到 User ID"))?
             .to_string();
 
         let email = auth_info
@@ -1386,27 +1531,38 @@ impl AccountManager {
             .unwrap_or("")
             .to_string();
 
-        // 检查账号是否已存在
-        if self.store.accounts.iter().any(|a| a.user_id == user_id) {
-            println!("[INFO] Trae IDE 账号已存在于账号管理中");
-            return Ok(None);
-        }
+        let trae_region = extract_region_from_auth_info(&auth_info);
 
         // 使用 Token 获取完整的用户信息（带超时）
         let client = TraeApiClient::new_with_token(&token)?;
         let user_info = match tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            client.get_user_info_by_token()
+            client.validate_token_alive()
         ).await {
             Ok(Ok(info)) => info,
-            Ok(Err(e)) => return Err(anyhow!("获取用户信息失败: {}", e)),
+            Ok(Err(e)) => return Err(anyhow!("Trae IDE 当前登录信息已失效或无法通过服务端校验: {}", e)),
             Err(_) => return Err(anyhow!("获取用户信息超时，请检查网络连接")),
         };
+
+        // 检查账号是否已存在
+        if let Some(existing_account) = self.store.accounts.iter_mut().find(|a| a.user_id == user_info.user_id) {
+            let mut changed = false;
+            if existing_account.region.trim().is_empty() && !trae_region.trim().is_empty() {
+                existing_account.region = trae_region;
+                existing_account.updated_at = chrono::Utc::now().timestamp();
+                changed = true;
+            }
+            if changed {
+                self.save_store()?;
+            }
+            println!("[INFO] Trae IDE 账号已存在于账号管理中");
+            return Ok(None);
+        }
 
         // 创建账号对象
         let mut account = Account::new(
             if username.is_empty() {
-                user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_id[..8.min(user_id.len())]))
+                user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())]))
             } else {
                 username
             },
@@ -1416,7 +1572,7 @@ impl AccountManager {
                 email
             },
             String::new(), // Trae IDE 不存储 cookies
-            user_id,
+            user_info.user_id.clone(),
             user_info.tenant_id,
         );
 
@@ -1425,6 +1581,7 @@ impl AccountManager {
         } else {
             avatar_url
         };
+        account.region = trae_region;
         account.jwt_token = Some(token);
 
         // 添加到账号列表
@@ -1507,7 +1664,7 @@ impl AccountManager {
                 println!("[get_account_statistics] 使用 token 也失败: {}", error_msg);
                 if error_msg.contains("403") {
                     Err(anyhow!("统计数据 API 需要账号 Cookies。请使用编辑账号功能输入邮箱密码重新登录，或删除账号后使用浏览器登录重新添加。"))
-                } else if error_msg.contains("401") || error_msg.contains("20310") || error_msg.contains("10304") {
+                } else if is_auth_expired_error_message(&error_msg) {
                     Err(anyhow!("登录已过期，请重新登录此账号以查看统计数据"))
                 } else {
                     Err(anyhow!("获取统计数据失败: {}", error_msg))
@@ -1544,12 +1701,12 @@ impl AccountManager {
                 // 有 Token，验证是否有效
                 match TraeApiClient::new_with_token(t) {
                     Ok(client) => {
-                        match client.get_usage_summary_by_token().await {
+                        match client.validate_token_alive().await {
                             Ok(_) => true,
                             Err(e) => {
                                 let error_msg = e.to_string();
                                 // 401 错误表示 Token 无效
-                                !error_msg.contains("401")
+                                !is_auth_expired_error_message(&error_msg)
                             }
                         }
                     }
@@ -1563,7 +1720,7 @@ impl AccountManager {
                             Ok(_) => true,
                             Err(e) => {
                                 let error_msg = e.to_string();
-                                !error_msg.contains("401")
+                                !is_auth_expired_error_message(&error_msg)
                             }
                         }
                     }

@@ -288,14 +288,6 @@ pub struct UserInfoResponse {
     pub message: Option<String>,
 }
 
-// 领取资源请求（新流程）
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ClaimResourceNewRequest {
-    pub ticket: String,
-    #[serde(rename = "invite_code")]
-    pub invite_code: Option<String>,
-}
-
 // 领取资源响应（新流程）
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClaimResourceNewResponse {
@@ -315,17 +307,6 @@ pub struct TodayAnalyticsResponse {
 pub struct TodayAnalyticsData {
     pub today_new_users: i32,
     pub cumulative_since_0420: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TotalAnalyticsResponse {
-    pub success: bool,
-    pub data: TotalAnalyticsData,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TotalAnalyticsData {
-    pub total_users: i32,
 }
 
 // 获取今日新用户统计

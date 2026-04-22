@@ -12,6 +12,14 @@ const API_BASE_US: &str = "https://api-us-east.trae.ai";
 const API_BASE_SG: &str = "https://api-sg-central.trae.ai";
 const API_BASE_UG: &str = "https://ug-normal.trae.ai";
 
+pub fn is_auth_expired_error_message(error_msg: &str) -> bool {
+    let normalized = error_msg.to_ascii_lowercase();
+    normalized.contains("401")
+        || normalized.contains("20310")
+        || normalized.contains("10304")
+        || normalized.contains("unauthorized")
+}
+
 pub struct EmailLoginResult {
     pub token: String,
     pub user_id: String,
@@ -114,7 +122,17 @@ impl TraeApiClient {
         Ok(headers)
     }
 
-    pub async fn get_user_info_by_token(&self) -> Result<TokenUserInfo> {
+    fn token_user_info_from_jwt(jwt_data: JwtPayload) -> TokenUserInfo {
+        TokenUserInfo {
+            user_id: jwt_data.user_id,
+            tenant_id: jwt_data.tenant_id,
+            screen_name: None,
+            avatar_url: None,
+            email: None,
+        }
+    }
+
+    async fn get_user_info_by_token_strict(&self) -> Result<TokenUserInfo> {
         let token = self.jwt_token.as_ref().ok_or_else(|| anyhow!("Token 不存在"))?;
         let jwt_data = Self::parse_jwt_token(token)?;
 
@@ -174,14 +192,25 @@ impl TraeApiClient {
             }
         }
 
-        // 所有端点都失败，使用 JWT 兜底
-        Ok(TokenUserInfo {
-            user_id: jwt_data.user_id,
-            tenant_id: jwt_data.tenant_id,
-            screen_name: None,
-            avatar_url: None,
-            email: None,
-        })
+        Err(last_error)
+    }
+
+    pub async fn get_user_info_by_token(&self) -> Result<TokenUserInfo> {
+        let token = self.jwt_token.as_ref().ok_or_else(|| anyhow!("Token 不存在"))?;
+        let jwt_data = Self::parse_jwt_token(token)?;
+
+        match self.get_user_info_by_token_strict().await {
+            Ok(info) => Ok(info),
+            Err(_) => Ok(Self::token_user_info_from_jwt(jwt_data)),
+        }
+    }
+
+    pub async fn get_user_identity_by_token(&self) -> Result<TokenUserInfo> {
+        self.get_user_info_by_token().await
+    }
+
+    pub async fn validate_token_alive(&self) -> Result<TokenUserInfo> {
+        self.get_user_info_by_token_strict().await
     }
 
     async fn get_user_info_with_token(&self) -> Result<UserInfoResult> {
