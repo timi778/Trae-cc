@@ -1,5 +1,5 @@
-pub mod account_manager;
-pub mod types;
+mod types;
+mod account_manager;
 
-pub use account_manager::AccountManager;
 pub use types::*;
+pub use account_manager::*;

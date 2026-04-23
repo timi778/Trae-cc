@@ -17,6 +17,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
+use serde::Deserialize;
 
 use reqwest::Client;
 use tokio::io::AsyncWriteExt;
@@ -29,6 +30,17 @@ use warp::Filter;
 
 use account::{AccountBrief, AccountManager, Account};
 use api::{TraeApiClient, UsageSummary, UsageQueryResponse, UserStatisticResult, is_auth_expired_error_message};
+
+/// 安全地获取 std::sync::Mutex 锁，如果锁被 poisoned 则恢复
+fn safe_lock<T>(mutex: &StdMutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    match mutex.lock() {
+        Ok(guard) => Some(guard),
+        Err(poisoned) => {
+            log::warn!("Mutex was poisoned, recovering...");
+            Some(poisoned.into_inner())
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn hide_console_window() {
@@ -144,7 +156,7 @@ type Result<T> = std::result::Result<T, ApiError>;
 async fn add_account_by_token(token: String, cookies: Option<String>, state: State<'_, AppState>) -> Result<Account> {
     log::info!("Adding account by token");
     let mut manager = state.account_manager.lock().await;
-    let result = manager.add_account_by_token(token, cookies, None).await.map_err(ApiError::from);
+    let result: Result<Account> = manager.add_account_by_token(token, cookies, None).await.map_err(ApiError::from);
     match &result {
         Ok(_) => log::info!("Account added successfully by token"),
         Err(e) => log::error!("Failed to add account by token: {:?}", e),
@@ -157,7 +169,7 @@ async fn add_account_by_token(token: String, cookies: Option<String>, state: Sta
 async fn add_account_by_email(email: String, password: String, state: State<'_, AppState>) -> Result<Account> {
     log::info!("Adding account by email: {}", email);
     let mut manager = state.account_manager.lock().await;
-    let result = manager.add_account_by_email(email, password).await.map_err(ApiError::from);
+    let result: Result<Account> = manager.add_account_by_email(email, password).await.map_err(ApiError::from);
     match &result {
         Ok(_) => log::info!("Account added successfully by email"),
         Err(e) => log::error!("Failed to add account by email: {:?}", e),
@@ -269,8 +281,13 @@ async fn download_and_run_installer(url: String) -> Result<String> {
 
 
 #[tauri::command]
-async fn quick_register(_app: AppHandle, _show_window: bool, _state: State<'_, AppState>) -> Result<Account> {
+async fn quick_register(
+    _app: AppHandle,
+    showWindow: bool,
+    _state: State<'_, AppState>,
+) -> Result<Account> {
     // 快速注册功能已禁用，请使用 quick_register_with_custom_tempmail
+    let _ = showWindow;
     Err(ApiError::from(anyhow::anyhow!("快速注册功能已禁用，请在设置中配置自定义临时邮箱后使用新功能")))
 }
 
@@ -278,7 +295,7 @@ async fn quick_register(_app: AppHandle, _show_window: bool, _state: State<'_, A
 #[tauri::command]
 async fn quick_register_with_custom_tempmail(
     app: AppHandle,
-    show_window: bool,
+    showWindow: bool,
     state: State<'_, AppState>,
 ) -> Result<Account> {
     use custom_tempmail::{CustomTempMailClient, generate_password};
@@ -359,11 +376,15 @@ async fn quick_register_with_custom_tempmail(
             }
 
             if !token.is_empty() {
-                if let Some(tx) = token_sender_route.lock().unwrap().take() {
-                    let _ = tx.send((token, url));
+                if let Some(mut guard) = safe_lock(&token_sender_route) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send((token, url));
+                    }
                 }
-                if let Some(tx) = shutdown_sender_route.lock().unwrap().take() {
-                    let _ = tx.send(());
+                if let Some(mut guard) = safe_lock(&shutdown_sender_route) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(());
+                    }
                 }
                 warp::reply::html("已收到 Token，注册成功。".to_string())
             } else {
@@ -396,12 +417,13 @@ async fn quick_register_with_custom_tempmail(
     let webview = WebviewWindowBuilder::new(&app, "trae-register", WebviewUrl::External("about:blank".parse().unwrap()))
         .title("Trae 注册")
         .inner_size(1000.0, 720.0)
-        .visible(show_window)
+        .visible(showWindow)
         .initialization_script(&helper_script_init)
         .on_page_load(move |window, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
                 let _ = window.eval(helper_script_onload.clone());
-                if let Some((code, password)) = pending_completion_onload.lock().unwrap().clone() {
+                let completion_data = safe_lock(&pending_completion_onload).and_then(|g| g.clone());
+                if let Some((code, password)) = completion_data {
                     let code_js = serde_json::to_string(&code).unwrap_or_else(|_| "\"\"".to_string());
                     let password_js = serde_json::to_string(&password).unwrap_or_else(|_| "\"\"".to_string());
                     let _ = window.eval(format!(
@@ -426,11 +448,15 @@ async fn quick_register_with_custom_tempmail(
     webview.on_window_event(move |event| {
         if let tauri::WindowEvent::Destroyed = event {
             println!("[custom-tempmail] 浏览器窗口被关闭");
-            if let Some(tx) = window_close_sender_clone.lock().unwrap().take() {
-                let _ = tx.send(());
+            if let Some(mut guard) = safe_lock(&window_close_sender_clone) {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
             }
-            if let Some(tx) = window_close_sender_clone2.lock().unwrap().take() {
-                let _ = tx.send(());
+            if let Some(mut guard) = safe_lock(&window_close_sender_clone2) {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
             }
         }
     });
@@ -468,7 +494,9 @@ async fn quick_register_with_custom_tempmail(
     };
 
     // 填入验证码和密码
-    *pending_completion.lock().unwrap() = Some((code.clone(), password.clone()));
+    if let Some(mut guard) = safe_lock(&pending_completion) {
+        *guard = Some((code.clone(), password.clone()));
+    }
     let code_js = serde_json::to_string(&code).unwrap_or_else(|_| "\"\"".to_string());
     let password_js = serde_json::to_string(&password).unwrap_or_else(|_| "\"\"".to_string());
     let _ = webview.eval(format!(
@@ -504,9 +532,9 @@ async fn quick_register_with_custom_tempmail(
     // 关闭浏览器窗口
     let _ = webview.close();
     let mut manager = state.account_manager.lock().await;
-    let mut account = manager.add_account_by_token(token, cookies, Some(password.clone())).await.map_err(ApiError::from)?;
+    let mut account: Account = manager.add_account_by_token(token, cookies, Some(password.clone())).await.map_err(ApiError::from)?;
 
-    // 如果邮箱为空或包含*，更新邮箱
+    // 如果邮箱为空或包含 *，更新邮箱
     if account.email.trim().is_empty() || account.email.contains('*') || !account.email.contains('@') {
         let _ = manager.update_account_email(&account.id, email.clone());
         account = manager.get_account(&account.id).map_err(ApiError::from)?;
@@ -1058,25 +1086,32 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
             let password = query.get("password").cloned().unwrap_or_default();
 
             if !email.trim().is_empty() || !password.is_empty() {
-                let mut creds = credentials_route.lock().unwrap();
-                if !email.trim().is_empty() {
-                    creds.email = Some(email.trim().to_string());
-                }
-                if !password.is_empty() {
-                    creds.password = Some(password);
+                if let Some(mut creds) = safe_lock(&credentials_route) {
+                    if !email.trim().is_empty() {
+                        creds.email = Some(email.trim().to_string());
+                    }
+                    if !password.is_empty() {
+                        creds.password = Some(password);
+                    }
                 }
             }
             if !token.is_empty() {
-                if let Some(tx) = token_sender_route.lock().unwrap().take() {
-                    let _ = tx.send((token, url));
+                if let Some(mut guard) = safe_lock(&token_sender_route) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send((token, url));
+                    }
                 }
-                if let Some(tx) = shutdown_sender_route.lock().unwrap().take() {
-                    let _ = tx.send(());
+                if let Some(mut guard) = safe_lock(&shutdown_sender_route) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(());
+                    }
                 }
                 warp::reply::html("已收到 Token，可以关闭此页面并返回应用。".to_string())
             } else if state == "logged_in" {
-                if let Some(tx) = login_complete_sender_route.lock().unwrap().take() {
-                    let _ = tx.send(href.clone());
+                if let Some(mut guard) = safe_lock(&login_complete_sender_route) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(href.clone());
+                    }
                 }
                 warp::reply::html(format!("检测到登录完成，等待获取 Token。{href}"))
             } else {
@@ -1114,8 +1149,10 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
     let window_close_sender_clone = window_close_sender.clone();
     webview.on_window_event(move |event| {
         if let tauri::WindowEvent::Destroyed = event {
-            if let Some(tx) = window_close_sender_clone.lock().unwrap().take() {
-                let _ = tx.send(());
+            if let Some(mut guard) = safe_lock(&window_close_sender_clone) {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
             }
         }
     });
@@ -1181,8 +1218,10 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
                     Ok(token) => break token,
                     Err(_) => {
                         let _ = state.browser_login_cancel.lock().await.take();
-                        if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                            let _ = tx.send(());
+                        if let Some(mut guard) = safe_lock(&session.shutdown) {
+                            if let Some(tx) = guard.take() {
+                                let _ = tx.send(());
+                            }
                         }
                         let _ = session.webview.close();
                         let mut browser_login = state.browser_login.lock().await;
@@ -1209,8 +1248,10 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
             }
             _ = &mut session.cancel => {
                 let _ = state.browser_login_cancel.lock().await.take();
-                if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                    let _ = tx.send(());
+                if let Some(mut guard) = safe_lock(&session.shutdown) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(());
+                    }
                 }
                 let _ = session.webview.close();
                 let mut browser_login = state.browser_login.lock().await;
@@ -1219,8 +1260,10 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
             }
             _ = &mut session.window_close => {
                 let _ = state.browser_login_cancel.lock().await.take();
-                if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                    let _ = tx.send(());
+                if let Some(mut guard) = safe_lock(&session.shutdown) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(());
+                    }
                 }
                 let mut browser_login = state.browser_login.lock().await;
                 *browser_login = None;
@@ -1235,14 +1278,16 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
                             break (token, logged_in_href.clone().unwrap_or_default());
                         }
                         Err(err) => {
-                            println!("[browser-login] 超时前 Cookies 兜底仍失败: {}", err);
+                        println!("[browser-login] 超时，Cookies 兜底仍失败 {}", err);
                         }
                     }
                 }
 
                 let _ = state.browser_login_cancel.lock().await.take();
-                if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                    let _ = tx.send(());
+                if let Some(mut guard) = safe_lock(&session.shutdown) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(());
+                    }
                 }
                 let _ = session.webview.close();
                 let mut browser_login = state.browser_login.lock().await;
@@ -1252,8 +1297,10 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
         }
     };
 
-    if let Some(tx) = session.shutdown.lock().unwrap().take() {
-        let _ = tx.send(());
+    if let Some(mut guard) = safe_lock(&session.shutdown) {
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(());
+        }
     }
     let _ = state.browser_login_cancel.lock().await.take();
 
@@ -1274,13 +1321,13 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
             .unwrap_or_default()
     });
 
-    let mut credentials = session.credentials.lock().unwrap().clone();
+    let mut credentials = safe_lock(&session.credentials).map(|g| g.clone()).unwrap_or_default();
     if credentials.email.as_deref().unwrap_or("").trim().is_empty()
         && credentials.password.as_deref().unwrap_or("").is_empty()
     {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            let snapshot = session.credentials.lock().unwrap().clone();
+            let snapshot = safe_lock(&session.credentials).map(|g| g.clone()).unwrap_or_default();
             if !snapshot.email.as_deref().unwrap_or("").trim().is_empty()
                 || !snapshot.password.as_deref().unwrap_or("").is_empty()
             {
@@ -1295,7 +1342,7 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
     let cookies = if cookies.is_empty() { None } else { Some(cookies) };
 
     let mut manager = state.account_manager.lock().await;
-    let mut account = manager
+    let mut account: Account = manager
         .upsert_account_by_token(token, cookies, None)
         .await
         .map_err(ApiError::from)?;
@@ -1327,8 +1374,10 @@ async fn cancel_browser_login(app: AppHandle, state: State<'_, AppState>) -> Res
         browser_login.take()
     };
     if let Some(session) = session {
-        if let Some(tx) = session.shutdown.lock().unwrap().take() {
-            let _ = tx.send(());
+        if let Some(mut guard) = safe_lock(&session.shutdown) {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(());
+            }
         }
         let _ = session.webview.destroy();
     }
@@ -1346,7 +1395,7 @@ async fn browser_auto_login_command(
     password: String,
     state: State<'_, AppState>,
 ) -> Result<Account> {
-    browser_auto_login::browser_auto_login(app, email, password, &state).await.map_err(|e| e.into())
+    browser_auto_login::browser_auto_login(app, email, password, &state).await
 }
 
 #[tauri::command]
@@ -1424,7 +1473,7 @@ async fn switch_account(account_id: String, force: Option<bool>, state: State<'_
             Ok(Ok(())) => {
                 // Trae 启动成功，数据库文件已生成，现在写入隐私模式
                 let result = tokio::task::spawn_blocking(move || {
-                    privacy::enable_privacy_mode_at_path_with_restart(db_path, || {
+                    privacy::enable_privacy_mode_at_path_with_path(db_path, || {
                         machine::kill_trae()?;
                         machine::open_trae()
                     })
@@ -1445,7 +1494,7 @@ async fn switch_account(account_id: String, force: Option<bool>, state: State<'_
     Ok(())
 }
 
-/// 获取账号使用量
+/// 获取账号使用情况
 #[tauri::command]
 async fn get_account_usage(account_id: String, state: State<'_, AppState>) -> Result<UsageSummary> {
     // 1. 获取账号信息（持有锁的时间极短）
@@ -1455,7 +1504,7 @@ async fn get_account_usage(account_id: String, state: State<'_, AppState>) -> Re
     };
 
     // 2. 执行网络请求（不持有锁，可并行）
-    let (summary, new_token) = fetch_usage_for_account(&account).await.map_err(ApiError::from)?;
+    let (summary, new_token): (UsageSummary, _) = fetch_usage_for_account(&account).await.map_err(ApiError::from)?;
 
     // 3. 更新账号信息（持有锁的时间极短）
     {
@@ -1477,7 +1526,8 @@ async fn fetch_usage_for_account(account: &Account) -> anyhow::Result<(UsageSumm
     let summary = if let Some(token) = &account.jwt_token {
         // 优先使用 Token
         let client = TraeApiClient::new_with_token(token)?;
-        match client.get_usage_summary_by_token().await {
+        let usage_result: anyhow::Result<UsageSummary> = client.get_usage_summary_by_token().await;
+        match usage_result {
             Ok(summary) => summary,
             Err(e) => {
                 let error_msg = e.to_string();
@@ -1489,7 +1539,7 @@ async fn fetch_usage_for_account(account: &Account) -> anyhow::Result<(UsageSumm
                     
                     new_token_info = Some((token_result.token.clone(), token_result.expired_at.clone()));
 
-                    // 使用新 Token 重新获取使用量
+                    // 使用新 Token 重新获取使用情况
                     let new_client = TraeApiClient::new_with_token(&token_result.token)?;
                     new_client.get_usage_summary_by_token().await?
                 } else if is_auth_expired_error_message(&error_msg) {
@@ -1518,14 +1568,16 @@ async fn fetch_usage_for_account(account: &Account) -> anyhow::Result<(UsageSumm
 #[tauri::command]
 async fn update_account_token(account_id: String, token: String, state: State<'_, AppState>) -> Result<UsageSummary> {
     let mut manager = state.account_manager.lock().await;
-    manager.update_account_token(&account_id, token).await.map_err(ApiError::from)
+    let res: Result<UsageSummary> = manager.update_account_token(&account_id, token).await.map_err(ApiError::from);
+    res
 }
 
 /// 刷新 Token（使用 Cookies）
 #[tauri::command]
 async fn refresh_token(account_id: String, state: State<'_, AppState>) -> Result<()> {
     let mut manager = state.account_manager.lock().await;
-    manager.refresh_token(&account_id).await.map_err(ApiError::from)
+    let res: Result<()> = manager.refresh_token(&account_id).await.map_err(ApiError::from);
+    res
 }
 
 /// 使用密码刷新 Token/Cookies
@@ -1536,10 +1588,11 @@ async fn refresh_token_with_password(
     state: State<'_, AppState>,
 ) -> Result<()> {
     let mut manager = state.account_manager.lock().await;
-    manager
+    let res: Result<()> = manager
         .refresh_token_with_password(&account_id, &password)
         .await
-        .map_err(ApiError::from)
+        .map_err(ApiError::from);
+    res
 }
 
 /// 使用邮箱密码重新登录并更新账号
@@ -1551,10 +1604,11 @@ async fn login_account_with_email(
     state: State<'_, AppState>,
 ) -> Result<UsageSummary> {
     let mut manager = state.account_manager.lock().await;
-    manager
+    let res: Result<UsageSummary> = manager
         .login_account_with_email(&account_id, email, password)
         .await
-        .map_err(ApiError::from)
+        .map_err(ApiError::from);
+    res
 }
 
 /// 更新账号邮箱/密码
@@ -1610,7 +1664,8 @@ async fn import_accounts(
     state: State<'_, AppState>
 ) -> Result<ImportAccountsResult> {
     let mut manager = state.account_manager.lock().await;
-    let (count, success, failed) = manager.import_accounts(&data).await.map_err(ApiError::from)?;
+    let import_res: Result<(usize, Vec<String>, Vec<(String, String, String)>)> = manager.import_accounts(&data).await.map_err(ApiError::from);
+    let (count, success, failed) = import_res?;
     Ok(ImportAccountsResult { count, success, failed })
 }
 
@@ -1625,16 +1680,18 @@ async fn get_usage_events(
     state: State<'_, AppState>
 ) -> Result<UsageQueryResponse> {
     let mut manager = state.account_manager.lock().await;
-    manager.get_usage_events(&account_id, start_time, end_time, page_num, page_size)
+    let res: Result<UsageQueryResponse> = manager.get_usage_events(&account_id, start_time, end_time, page_num, page_size)
         .await
-        .map_err(ApiError::from)
+        .map_err(ApiError::from);
+    res
 }
 
 /// 从 Trae IDE 读取账号
 #[tauri::command]
 async fn read_trae_account(state: State<'_, AppState>) -> Result<Option<Account>> {
     let mut manager = state.account_manager.lock().await;
-    manager.read_trae_ide_account().await.map_err(ApiError::from)
+    let res: Result<Option<Account>> = manager.read_trae_ide_account().await.map_err(ApiError::from);
+    res
 }
 
 /// 获取当前系统机器码
@@ -1674,44 +1731,10 @@ async fn set_trae_machine_id(machine_id: String) -> Result<()> {
     machine::set_trae_machine_id(&machine_id).map_err(ApiError::from)
 }
 
-/// 清除 Trae IDE 登录状态（让 IDE 变成全新安装状态）
+/// 清除 Trae IDE 登录状态（使 IDE 变成全新安装状态）
 #[tauri::command]
 async fn clear_trae_login_state() -> Result<()> {
     machine::clear_trae_login_state().map_err(ApiError::from)
-}
-
-/// 备份账号的 Trae 上下文数据
-#[tauri::command]
-async fn backup_account_context(account_id: String) -> Result<String> {
-    let backup_path = machine::backup_account_context(&account_id).map_err(ApiError::from)?;
-    Ok(backup_path.to_string_lossy().to_string())
-}
-
-/// 恢复账号的 Trae 上下文数据
-#[tauri::command]
-async fn restore_account_context(account_id: String) -> Result<()> {
-    machine::restore_account_context(&account_id).map_err(ApiError::from)
-}
-
-/// 检查账号是否有上下文备份
-#[tauri::command]
-async fn has_account_context_backup(account_id: String) -> Result<bool> {
-    Ok(machine::has_account_context_backup(&account_id))
-}
-
-/// 删除账号的上下文备份
-#[tauri::command]
-async fn delete_account_context_backup(account_id: String) -> Result<()> {
-    machine::delete_account_context_backup(&account_id).map_err(ApiError::from)
-}
-
-/// 合并两个账号的对话记录（当前账号的对话合并到目标账号）
-#[tauri::command]
-async fn merge_two_accounts_context(
-    current_account_id: String,
-    target_account_id: String,
-) -> Result<()> {
-    machine::merge_two_accounts_context(&current_account_id, &target_account_id).map_err(ApiError::from)
 }
 
 /// 获取保存的 Trae IDE 路径
@@ -1852,7 +1875,7 @@ async fn open_pricing(account_id: String, app: AppHandle, state: State<'_, AppSt
     }
 
     let cookies = account.cookies.clone();
-    let cookies_for_js = cookies.replace('\\', "\\\\").replace('`', "\\`");
+    let cookies_for_js = cookies.replace('\\', "\\\\").replace('`', "\\`").replace('\'', "\\'");
     let js_onload = format!(
         r#"
 (() => {{
@@ -1948,14 +1971,16 @@ async fn open_pricing(account_id: String, app: AppHandle, state: State<'_, AppSt
 #[tauri::command]
 async fn get_user_statistics(account_id: String, state: State<'_, AppState>) -> Result<UserStatisticResult> {
     let manager = state.account_manager.lock().await;
-    manager.get_account_statistics(&account_id).await.map_err(ApiError::from)
+    let res: Result<UserStatisticResult> = manager.get_account_statistics(&account_id).await.map_err(ApiError::from);
+    res
 }
 
-/// 检测 Token 无效的账号（只检测，不删除）
+/// 检查 Token 无效的账号（只检测，不删除）
 #[tauri::command]
 async fn check_invalid_accounts(state: State<'_, AppState>) -> Result<Vec<(String, String, String)>> {
     let manager = state.account_manager.lock().await;
-    manager.check_invalid_token_accounts().await.map_err(ApiError::from)
+    let res: Result<Vec<(String, String, String)>> = manager.check_invalid_token_accounts().await.map_err(ApiError::from);
+    res
 }
 
 /// 删除指定的账号
@@ -2365,10 +2390,10 @@ fn build_register_helper_script(port: u16) -> String {
     return false;
   };
 
-  // 检测注册状态（检测 go3958317564 类名的提示元素）
+  // 检测注册状态（检查 go3958317564 类名的提示元素）
   const startStatusDetection = () => {
     let attempts = 0;
-    const maxAttempts = 30; // 最多检测 30 秒
+    const maxAttempts = 30; // 最多检查 30 次
     let lastStatusText = "";
     const checkInterval = setInterval(() => {
       attempts++;
@@ -2570,15 +2595,46 @@ pub fn run() {
     if args.contains(&"--silent".to_string()) {
         #[cfg(target_os = "windows")]
         hide_console_window();
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-        rt.block_on(async {
-            let _ = handle_silent_start().await;
-        });
+        match tokio::runtime::Runtime::new() {
+            Ok(rt) => {
+                rt.block_on(async {
+                    let _ = handle_silent_start().await;
+                });
+            }
+            Err(e) => {
+                log::error!("Failed to create runtime: {}", e);
+            }
+        }
         std::process::exit(0);
     }
 
     log::info!("Initializing account manager...");
-    let account_manager = AccountManager::new().expect("无法初始化账号管理器");
+    let account_manager = match AccountManager::new() {
+        Ok(manager) => manager,
+        Err(e) => {
+            log::error!("Failed to initialize account manager: {}", e);
+            // Show error message and exit gracefully
+            #[cfg(target_os = "windows")]
+            {
+                use std::ffi::CString;
+                use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxA, MB_ICONERROR, MB_OK};
+                let message = format!("初始化账号管理器失败:\n{}\n\n请检查应用数据目录权限。", e);
+                if let Ok(c_message) = CString::new(message) {
+                    if let Ok(c_title) = CString::new("Trae账号管理 - 错误") {
+                        unsafe {
+                            MessageBoxA(
+                                std::ptr::null_mut(),
+                                c_message.as_ptr() as *const u8,
+                                c_title.as_ptr() as *const u8,
+                                MB_OK | MB_ICONERROR,
+                            );
+                        }
+                    }
+                }
+            }
+            std::process::exit(1);
+        }
+    };
     let settings = load_settings_from_disk().unwrap_or_default();
     let _ = autostart::set_auto_start(settings.auto_start_enabled);
 
@@ -2627,11 +2683,6 @@ pub fn run() {
             get_trae_machine_id,
             set_trae_machine_id,
             clear_trae_login_state,
-            backup_account_context,
-            restore_account_context,
-            has_account_context_backup,
-            delete_account_context_backup,
-            merge_two_accounts_context,
             get_trae_path,
             set_trae_path,
             scan_trae_path,

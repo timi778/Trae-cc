@@ -128,6 +128,23 @@ fn read_local_trae_auth_info() -> Result<serde_json::Value> {
         .map_err(|e| anyhow!("解析 Trae IDE 认证信息失败: {}", e))
 }
 
+/// 生成安全的用户显示名称，避免空字符串或越界切片导致的 panic
+fn safe_user_display_name(user_id: &str, fallback_name: Option<&str>) -> String {
+    if let Some(name) = fallback_name {
+        if !name.trim().is_empty() {
+            return name.trim().to_string();
+        }
+    }
+    
+    if user_id.len() >= 8 {
+        format!("User_{}", &user_id[..8])
+    } else if !user_id.is_empty() {
+        format!("User_{}", user_id)
+    } else {
+        "User_Unknown".to_string()
+    }
+}
+
 /// 账号管理器
 pub struct AccountManager {
     store: AccountStore,
@@ -398,7 +415,7 @@ impl AccountManager {
                     Err(_) => {
                         println!("[AccountManager] ⚠️ Cookies 获取详情失败，使用 Token 数据");
                         (
-                            user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                            safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                             user_info.email.clone().unwrap_or_default(),
                             user_info.avatar_url.clone().unwrap_or_default(),
                         )
@@ -406,7 +423,7 @@ impl AccountManager {
                 }
             } else {
                 (
-                    user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                    safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                     user_info.email.clone().unwrap_or_default(),
                     user_info.avatar_url.clone().unwrap_or_default(),
                 )
@@ -458,7 +475,7 @@ impl AccountManager {
                 Err(_) => {
                     println!("[AccountManager] ⚠️ Cookies 获取详情失败，使用 Token 数据");
                     (
-                        user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                        safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                         user_info.email.unwrap_or_default(),
                         user_info.avatar_url.unwrap_or_default(),
                     )
@@ -466,7 +483,7 @@ impl AccountManager {
             }
         } else {
             (
-                user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                 user_info.email.unwrap_or_default(),
                 user_info.avatar_url.unwrap_or_default(),
             )
@@ -536,7 +553,7 @@ impl AccountManager {
                     Err(_) => {
                         println!("[AccountManager] ⚠️ Cookies 获取详情失败，使用 Token 数据");
                         (
-                            user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                            safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                             user_info.email.clone().unwrap_or_default(),
                             user_info.avatar_url.clone().unwrap_or_default(),
                             String::new(),
@@ -546,7 +563,7 @@ impl AccountManager {
                 }
             } else {
                 (
-                    user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                    safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                     user_info.email.clone().unwrap_or_default(),
                     user_info.avatar_url.clone().unwrap_or_default(),
                     String::new(),
@@ -799,9 +816,10 @@ impl AccountManager {
 
     /// 切换账号（设置活跃账号并将登录信息写入 Trae IDE）
     pub async fn switch_account(&mut self, account_id: &str, force: bool) -> Result<()> {
-        // 检查是否已经是当前使用的账号
+        // 检查是否已经是当前使用的账号（force=true 时强制重新切换，否则跳过）
         if !force && self.store.current_account_id.as_deref() == Some(account_id) {
-            return Err(anyhow!("该账号已经是当前使用的账号"));
+            println!("[INFO] 目标账号已经是当前使用的账号，跳过切换操作");
+            return Ok(());
         }
 
         let account = self.store.accounts.iter()
@@ -1560,12 +1578,14 @@ impl AccountManager {
         }
 
         // 创建账号对象
+        let display_name = if !username.is_empty() {
+            username.clone()
+        } else {
+            user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())]))
+        };
+        
         let mut account = Account::new(
-            if username.is_empty() {
-                user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())]))
-            } else {
-                username
-            },
+            display_name,
             if email.is_empty() {
                 user_info.email.unwrap_or_default()
             } else {

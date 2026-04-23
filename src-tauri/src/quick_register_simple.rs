@@ -48,7 +48,12 @@ pub async fn quick_register_simple(
     }
     
     println!("[quick-register-simple] 邮箱: {}", email);
-    println!("[quick-register-simple] 密码: {}******", &password[..3]);
+    let password_preview = if password.len() >= 3 {
+        &password[..3]
+    } else {
+        &password
+    };
+    println!("[quick-register-simple] 密码: {}******", password_preview);
 
     // 启动本地回调服务器（用于接收 JS 拦截的 Token）
     let (token_tx, token_rx) = oneshot::channel::<(String, String)>();

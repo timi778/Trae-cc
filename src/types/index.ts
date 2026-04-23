@@ -83,30 +83,6 @@ export interface UsageSummary {
   is_dollar_billing: boolean;
 }
 
-// 使用事件
-export interface UsageEvent {
-  session_id: string;
-  usage_time: number;
-  mode: string;
-  model_name: string;
-  amount_float: number;
-  cost_money_float: number;
-  use_max_mode: boolean;
-  product_type_list: number[];
-  extra_info: {
-    cache_read_token: number;
-    cache_write_token: number;
-    input_token: number;
-    output_token: number;
-  };
-}
-
-// 使用事件响应
-export interface UsageEventsResponse {
-  total: number;
-  user_usage_group_by_sessions: UsageEvent[];
-}
-
 // API 错误
 export interface ApiError {
   message: string;

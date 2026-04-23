@@ -593,37 +593,7 @@ function App() {
         setConfirmModal(null);
         addToast("info", infoToast);
         try {
-          // 1. 获取当前活跃账号（用于备份）
-          const currentAccount = accounts.find(a => a.is_active);
-          const targetAccount = accounts.find(a => a.id === accountId);
-          console.log(`[SwitchAccount] ========== 开始切换账号 ==========`);
-          console.log(`[SwitchAccount] 当前活跃账号:`, currentAccount?.id, currentAccount?.email);
-          console.log(`[SwitchAccount] 目标账号:`, accountId, targetAccount?.email);
-          
-          // 2. 如果有当前活跃账号，先备份其上下文
-          if (currentAccount && currentAccount.id !== accountId) {
-            try {
-              await api.backupAccountContext(currentAccount.id);
-            } catch {
-              // 备份失败不阻止切换
-            }
-          }
-          
-          // 3. 执行账号切换
-          console.log(`[SwitchAccount] 开始执行账号切换...`);
-          await api.switchAccount(accountId, { force });
-          console.log(`[SwitchAccount] 账号切换完成`);
-
-          // 4. 恢复新账号的上下文（如果有备份）
-          try {
-            const hasBackup = await api.hasAccountContextBackup(accountId);
-            if (hasBackup) {
-              await api.restoreAccountContext(accountId);
-            }
-          } catch {
-            // 恢复失败不阻止切换
-          }
-          
+          await api.switchAccount(accountId);
           await loadAccounts();
           addToast("success", successToast);
         } catch (err: any) {

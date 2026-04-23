@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBrief, AppSettings, UsageSummary, UsageEventsResponse, UserStatisticData } from "../types";
+import type { Account, AccountBrief, AppSettings, UsageSummary, UserStatisticData } from "../types";
 
 // ============ 网络检查工具 ============
 
@@ -118,34 +118,6 @@ export async function importAccounts(data: string): Promise<ImportAccountsResult
   return invoke("import_accounts", { data });
 }
 
-// 备份账号的 Trae 上下文数据
-export async function backupAccountContext(accountId: string): Promise<string> {
-  return invoke("backup_account_context", { accountId });
-}
-
-// 恢复账号的 Trae 上下文数据
-export async function restoreAccountContext(accountId: string): Promise<void> {
-  return invoke("restore_account_context", { accountId });
-}
-
-// 检查账号是否有上下文备份
-export async function hasAccountContextBackup(accountId: string): Promise<boolean> {
-  return invoke("has_account_context_backup", { accountId });
-}
-
-// 删除账号的上下文备份
-export async function deleteAccountContextBackup(accountId: string): Promise<void> {
-  return invoke("delete_account_context_backup", { accountId });
-}
-
-// 合并两个账号的对话记录（当前账号的对话合并到目标账号）
-export async function mergeTwoAccountsContext(
-  currentAccountId: string,
-  targetAccountId: string
-): Promise<void> {
-  return invoke("merge_two_accounts_context", { currentAccountId, targetAccountId });
-}
-
 export async function clearAccounts(): Promise<number> {
   return invoke("clear_accounts");
 }
@@ -158,25 +130,6 @@ export async function getSettings(): Promise<AppSettings> {
 
 export async function updateSettings(settings: AppSettings): Promise<AppSettings> {
   return invoke("update_settings", { settings });
-}
-
-// ============ 使用事件 API ============
-
-// 获取使用事件
-export async function getUsageEvents(
-  accountId: string,
-  startTime: number,
-  endTime: number,
-  pageNum: number = 1,
-  pageSize: number = 20
-): Promise<UsageEventsResponse> {
-  return invokeNetwork("get_usage_events", {
-    accountId,
-    startTime,
-    endTime,
-    pageNum,
-    pageSize
-  });
 }
 
 // 从 Trae IDE 读取当前登录账号

@@ -26,5 +26,5 @@ fn main() {
             break;
         }
     }
-    tauri_build::build()
+    tauri_build::build();
 }

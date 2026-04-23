@@ -65,14 +65,14 @@ pub fn reset_machine_guid() -> Result<String> {
 
 /// 获取 Trae IDE 数据目录路径
 #[cfg(target_os = "windows")]
-fn get_trae_data_path() -> Result<PathBuf> {
+pub fn get_trae_data_path() -> Result<PathBuf> {
     let appdata = std::env::var("APPDATA")
         .map_err(|_| anyhow!("无法获取 APPDATA 环境变量"))?;
     Ok(PathBuf::from(appdata).join("Trae"))
 }
 
 #[cfg(target_os = "macos")]
-fn get_trae_data_path() -> Result<PathBuf> {
+pub fn get_trae_data_path() -> Result<PathBuf> {
     let home = std::env::var("HOME")
         .map_err(|_| anyhow!("无法获取 HOME 环境变量"))?;
     Ok(PathBuf::from(home)
@@ -691,64 +691,20 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
         let _ = fs::remove_file(&local_state_path);
     }
 
-    // 5. 清除 IndexedDB 中的登录相关数据（保留聊天记录和上下文）
-    let indexed_db_path = trae_path.join("IndexedDB");
-    if indexed_db_path.exists() {
-        // 只删除包含登录相关数据的 IndexedDB，保留聊天记录
-        let login_related_patterns = ["auth", "login", "token", "session", "credential"];
-        if let Ok(entries) = fs::read_dir(&indexed_db_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-                if login_related_patterns.iter().any(|p| name.contains(p)) {
-                    let _ = fs::remove_dir_all(&path);
-                    println!("[INFO] 已清除登录相关的 IndexedDB: {}", name);
-                }
-            }
-        }
-    }
-
-    // 6. 清除 Local Storage 中的登录相关数据（保留浏览记录和上下文）
-    let local_storage_path = trae_path.join("Local Storage");
-    if local_storage_path.exists() {
-        // 只删除包含登录相关键值的 Local Storage 文件
-        let login_keys = ["auth", "login", "token", "session", "credential", "trae"];
-        if let Ok(entries) = fs::read_dir(&local_storage_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(ext) = path.extension() {
-                    if ext == "localstorage" {
-                        // 读取文件内容，检查是否包含登录相关键值
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            let content_lower = content.to_lowercase();
-                            if login_keys.iter().any(|k| content_lower.contains(k)) {
-                                let _ = fs::remove_file(&path);
-                                println!("[INFO] 已清除登录相关的 Local Storage");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 7. 保留 Session Storage（包含浏览记录和上下文，通常只包含当前会话数据）
-    // Session Storage 通常只包含当前会话数据，不删除以保留用户体验
-
-    // 8. 清除 Cookies
+    // 5. 清除 Cookies
     let cookies_path = trae_path.join("Network").join("Cookies");
     if cookies_path.exists() {
         let _ = fs::remove_file(&cookies_path);
         println!("[INFO] 已清除 Cookies");
     }
 
-    // 9. 清除 Cookies-journal
+    // 6. 清除 Cookies-journal
     let cookies_journal_path = trae_path.join("Network").join("Cookies-journal");
     if cookies_journal_path.exists() {
         let _ = fs::remove_file(&cookies_journal_path);
     }
 
-    // 10. 更新 storage.json 中的 telemetry ID 并写入登录信息
+    // 7. 更新 storage.json 中的 telemetry ID 并写入登录信息
     let storage_dir = trae_path.join("User").join("globalStorage");
     fs::create_dir_all(&storage_dir)
         .map_err(|e| anyhow!("创建目录失败: {}", e))?;
@@ -791,7 +747,7 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     fs::rename(&temp_storage_path, &storage_path)
         .map_err(|e| anyhow!("应用配置文件失败 (rename): {}", e))?;
 
-    // 11. 写入新的登录信息
+    // 8. 写入新的登录信息
     write_trae_login_info(info)?;
 
     println!("[INFO] 已切换 Trae IDE 到账号: {}", info.email);
@@ -879,58 +835,6 @@ pub fn clear_trae_login_state() -> Result<()> {
         println!("[INFO] 已删除 Local State");
     }
 
-    // 7. 清除 IndexedDB 中的登录相关数据（保留浏览记录）
-    let indexed_db_path = trae_path.join("IndexedDB");
-    if indexed_db_path.exists() {
-        // 只删除包含登录相关数据的 IndexedDB，保留其他数据
-        let login_related_patterns = ["auth", "login", "token", "session", "credential"];
-        if let Ok(entries) = fs::read_dir(&indexed_db_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-                if login_related_patterns.iter().any(|p| name.contains(p)) {
-                    let _ = fs::remove_dir_all(&path);
-                    println!("[INFO] 已清除登录相关的 IndexedDB: {}", name);
-                }
-            }
-        }
-    }
-
-    // 8. 清除 Local Storage 中的登录相关数据（保留浏览记录和上下文）
-    let local_storage_path = trae_path.join("Local Storage");
-    if local_storage_path.exists() {
-        // 只删除包含登录相关键值的 Local Storage 文件
-        let login_keys = ["auth", "login", "token", "session", "credential", "trae"];
-        if let Ok(entries) = fs::read_dir(&local_storage_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(ext) = path.extension() {
-                    if ext == "localstorage" {
-                        // 读取文件内容，检查是否包含登录相关键值
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            let content_lower = content.to_lowercase();
-                            if login_keys.iter().any(|k| content_lower.contains(k)) {
-                                let _ = fs::remove_file(&path);
-                                println!("[INFO] 已清除登录相关的 Local Storage");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 9. 保留 Session Storage（包含浏览记录和上下文）
-    // Session Storage 通常只包含当前会话数据，不删除
-
-    // 10. 清除登录相关的 Cookies（保留其他 Cookies）
-    let cookies_path = trae_path.join("Network").join("Cookies");
-    if cookies_path.exists() {
-        // SQLite 数据库，需要特殊处理
-        // 暂时保留 Cookies，因为删除会影响所有网站登录状态
-        println!("[INFO] 保留 Cookies（避免影响所有网站登录状态）");
-    }
-
     Ok(())
 }
 
@@ -996,360 +900,6 @@ pub fn set_machine_guid(_new_guid: &str) -> Result<()> {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn reset_machine_guid() -> Result<String> {
     Err(anyhow!("此功能仅支持 Windows 和 macOS 系统"))
-}
-
-/// 获取 Trae workspaceStorage 路径（聊天记录和上下文存储位置）
-pub fn get_trae_workspace_storage_path() -> Result<PathBuf> {
-    let trae_path = get_trae_data_path()?;
-    Ok(trae_path.join("User").join("workspaceStorage"))
-}
-
-/// 获取 Trae globalStorage 路径（全局状态存储）
-pub fn get_trae_global_storage_path() -> Result<PathBuf> {
-    let trae_path = get_trae_data_path()?;
-    Ok(trae_path.join("User").join("globalStorage"))
-}
-
-/// 备份指定账号的 Trae 上下文数据
-/// 返回备份目录路径
-pub fn backup_account_context(account_id: &str) -> Result<PathBuf> {
-    let proj_dirs = directories::ProjectDirs::from("com", "hhj", "trae-cc")
-        .ok_or_else(|| anyhow!("无法获取应用数据目录"))?;
-    let backup_dir = proj_dirs.data_dir().join("account_contexts").join(account_id);
-    
-    fs::create_dir_all(&backup_dir)?;
-    
-    // 备份 workspaceStorage
-    let workspace_src = get_trae_workspace_storage_path()?;
-    let workspace_dst = backup_dir.join("workspaceStorage");
-    if workspace_src.exists() {
-        copy_dir_all(&workspace_src, &workspace_dst)?;
-    }
-    
-    // 备份 globalStorage
-    let global_src = get_trae_global_storage_path()?;
-    let global_dst = backup_dir.join("globalStorage");
-    if global_src.exists() {
-        copy_dir_all(&global_src, &global_dst)?;
-    }
-    
-    // 备份 state.vscdb
-    let state_src = get_trae_state_db_path()?;
-    let state_dst = backup_dir.join("state.vscdb");
-    if state_src.exists() {
-        fs::copy(&state_src, &state_dst)?;
-    }
-    
-    Ok(backup_dir)
-}
-
-/// 恢复指定账号的 Trae 上下文数据
-/// 注意：此函数会保留当前已写入的登录信息，只恢复聊天记录和上下文
-pub fn restore_account_context(account_id: &str) -> Result<()> {
-    let proj_dirs = directories::ProjectDirs::from("com", "hhj", "trae-cc")
-        .ok_or_else(|| anyhow!("无法获取应用数据目录"))?;
-    let backup_dir = proj_dirs.data_dir().join("account_contexts").join(account_id);
-    
-    if !backup_dir.exists() {
-        return Err(anyhow!("账号 {} 没有备份的上下文数据", account_id));
-    }
-    
-    // 恢复 workspaceStorage（聊天记录和上下文）
-    let workspace_src = backup_dir.join("workspaceStorage");
-    let workspace_dst = get_trae_workspace_storage_path()?;
-    if workspace_src.exists() {
-        // 先删除现有的
-        if workspace_dst.exists() {
-            fs::remove_dir_all(&workspace_dst)?;
-        }
-        copy_dir_all(&workspace_src, &workspace_dst)?;
-
-    }
-    
-    // 恢复 globalStorage，但需要保留当前的登录信息
-    let global_src = backup_dir.join("globalStorage");
-    let global_dst = get_trae_global_storage_path()?;
-    if global_src.exists() {
-        // 读取当前 globalStorage 中的登录信息（如果存在）
-        let current_storage_path = global_dst.join("storage.json");
-        let current_auth_info = if current_storage_path.exists() {
-            if let Ok(content) = fs::read_to_string(&current_storage_path) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                    json.get("iCubeAuthInfo://icube.cloudide").cloned()
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        
-        // 删除现有的 globalStorage
-        if global_dst.exists() {
-            fs::remove_dir_all(&global_dst)?;
-        }
-        
-        // 复制备份的 globalStorage
-        copy_dir_all(&global_src, &global_dst)?;
-        
-        // 如果有当前登录信息，合并回恢复后的 storage.json
-        if let Some(auth_info) = current_auth_info {
-            let restored_storage_path = global_dst.join("storage.json");
-            if let Ok(content) = fs::read_to_string(&restored_storage_path) {
-                if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(obj) = json.as_object_mut() {
-                        // 保留当前的登录信息
-                        obj.insert("iCubeAuthInfo://icube.cloudide".to_string(), auth_info);
-                        
-                        // 写回文件
-                        if let Ok(new_content) = serde_json::to_string_pretty(&json) {
-                            let _ = fs::write(&restored_storage_path, new_content);
-
-                        }
-                    }
-                }
-            }
-        }
-        
-
-    }
-    
-    // 恢复 state.vscdb（聊天记录数据库）
-    let state_src = backup_dir.join("state.vscdb");
-    let state_dst = get_trae_state_db_path()?;
-    if state_src.exists() {
-        fs::copy(&state_src, &state_dst)?;
-
-    }
-    
-    Ok(())
-}
-
-/// 检查账号是否有备份的上下文数据
-pub fn has_account_context_backup(account_id: &str) -> bool {
-    if let Ok(proj_dirs) = directories::ProjectDirs::from("com", "hhj", "trae-cc")
-        .ok_or_else(|| anyhow!("无法获取应用数据目录")) {
-        let backup_dir = proj_dirs.data_dir().join("account_contexts").join(account_id);
-        backup_dir.exists()
-    } else {
-        false
-    }
-}
-
-/// 删除账号的上下文备份
-pub fn delete_account_context_backup(account_id: &str) -> Result<()> {
-    let proj_dirs = directories::ProjectDirs::from("com", "hhj", "trae-cc")
-        .ok_or_else(|| anyhow!("无法获取应用数据目录"))?;
-    let backup_dir = proj_dirs.data_dir().join("account_contexts").join(account_id);
-    
-    if backup_dir.exists() {
-        fs::remove_dir_all(&backup_dir)?;
-    }
-    
-    Ok(())
-}
-
-/// 合并两个账号的对话记录到目标账号的备份中
-/// 这会将当前账号的 workspaceStorage 中的对话合并到目标账号的备份
-/// 注意：不合并 state.vscdb，因为它包含加密数据，与特定账号绑定
-pub fn merge_two_accounts_context(current_account_id: &str, target_account_id: &str) -> Result<()> {
-    let proj_dirs = directories::ProjectDirs::from("com", "hhj", "trae-cc")
-        .ok_or_else(|| anyhow!("无法获取应用数据目录"))?;
-    
-    let target_backup_dir = proj_dirs.data_dir().join("account_contexts").join(target_account_id);
-    let target_workspace = target_backup_dir.join("workspaceStorage");
-    
-
-    
-    // 确保目标备份目录存在
-    fs::create_dir_all(&target_workspace)?;
-    
-    // 只合并当前账号的对话到目标账号
-    let current_backup_dir = proj_dirs.data_dir().join("account_contexts").join(current_account_id);
-    let workspace_src = current_backup_dir.join("workspaceStorage");
-    
-    let mut _total_merged = 0;
-    
-    // 只合并 workspaceStorage（包含非加密的对话记录）
-    // 注意：不合并 state.vscdb，因为它包含加密数据，与特定账号绑定
-    if workspace_src.exists() {
-        match merge_workspace_storage(&workspace_src, &target_workspace) {
-            Ok(count) => {
-                _total_merged += count;
-            }
-            Err(_) => {}
-        }
-    }
-    
-    Ok(())
-}
-
-/// 合并两个 workspaceStorage 目录
-/// 将 src 中的对话记录合并到 dst 中
-fn merge_workspace_storage(src: &PathBuf, dst: &PathBuf) -> Result<usize> {
-    if !src.exists() {
-        return Ok(0);
-    }
-    
-    fs::create_dir_all(dst)?;
-    
-    let mut merged_count = 0;
-    
-    // 遍历源目录中的所有工作区
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let file_name = entry.file_name();
-        let dst_path = dst.join(&file_name);
-        
-        if src_path.is_dir() {
-            // 如果是目录，递归合并
-            if dst_path.exists() {
-                // 目标已存在，合并内部文件
-                merged_count += merge_directory_contents(&src_path, &dst_path)?;
-            } else {
-                // 目标不存在，直接复制
-                copy_dir_all(&src_path, &dst_path)?;
-                merged_count += 1;
-            }
-        } else if src_path.is_file() {
-            // 如果是文件，根据类型决定是否合并
-            let file_name_str = file_name.to_string_lossy();
-            
-            if file_name_str.ends_with(".vscdb") {
-                // SQLite 数据库文件是二进制格式，无法合并
-                // 策略：重命名并复制，保留两个文件
-                if !dst_path.exists() {
-                    fs::copy(&src_path, &dst_path)?;
-                    merged_count += 1;
-                } else {
-                    // 目标已存在，创建副本
-                    let mut counter = 1;
-                    let mut new_dst_path = dst.with_file_name(format!("{}_{}.vscdb", 
-                        file_name_str.strip_suffix(".vscdb").unwrap_or(&file_name_str), 
-                        counter));
-                    while new_dst_path.exists() {
-                        counter += 1;
-                        new_dst_path = dst.with_file_name(format!("{}_{}.vscdb", 
-                            file_name_str.strip_suffix(".vscdb").unwrap_or(&file_name_str), 
-                            counter));
-                    }
-                    fs::copy(&src_path, &new_dst_path)?;
-                    merged_count += 1;
-                }
-            } else if file_name_str.ends_with(".json") {
-                // JSON 文件可以尝试合并
-                if dst_path.exists() {
-                    merge_database_file(&src_path, &dst_path)?;
-                } else {
-                    fs::copy(&src_path, &dst_path)?;
-                }
-                merged_count += 1;
-            } else {
-                // 其他文件，如果不存在则复制
-                if !dst_path.exists() {
-                    fs::copy(&src_path, &dst_path)?;
-                    merged_count += 1;
-                }
-            }
-        }
-    }
-    
-    Ok(merged_count)
-}
-
-/// 合并目录内容
-fn merge_directory_contents(src: &PathBuf, dst: &PathBuf) -> Result<usize> {
-    let mut count = 0;
-    
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let file_name = entry.file_name();
-        let dst_path = dst.join(&file_name);
-        
-        if src_path.is_dir() {
-            if !dst_path.exists() {
-                copy_dir_all(&src_path, &dst_path)?;
-                count += 1;
-            } else {
-                count += merge_directory_contents(&src_path, &dst_path)?;
-            }
-        } else if src_path.is_file() {
-            let file_name_str = file_name.to_string_lossy();
-            
-            if file_name_str.ends_with(".vscdb") {
-                // SQLite 数据库文件是二进制格式，无法合并，直接复制（如果不存在）
-                if !dst_path.exists() {
-                    fs::copy(&src_path, &dst_path)?;
-                    count += 1;
-                }
-            } else if file_name_str.ends_with(".json") {
-                // JSON 文件可以尝试合并
-                if dst_path.exists() {
-                    merge_database_file(&src_path, &dst_path)?;
-                } else {
-                    fs::copy(&src_path, &dst_path)?;
-                }
-                count += 1;
-            } else if !dst_path.exists() {
-                fs::copy(&src_path, &dst_path)?;
-                count += 1;
-            }
-        }
-    }
-    
-    Ok(count)
-}
-
-/// 合并数据库文件（简单的键值合并）
-fn merge_database_file(src: &PathBuf, dst: &PathBuf) -> Result<()> {
-    // 检查文件扩展名
-    let file_name = src.file_name().unwrap_or_default().to_string_lossy();
-    
-    // .vscdb 文件是 SQLite 二进制数据库，不能直接合并
-    // 策略：保留目标文件，因为聊天记录已经在 workspaceStorage 中
-    if file_name.ends_with(".vscdb") {
-        return Ok(());
-    }
-    
-    // 对于 .json 文件，尝试作为 JSON 合并
-    if file_name.ends_with(".json") {
-        // 尝试读取为文本
-        match (fs::read_to_string(src), fs::read_to_string(dst)) {
-            (Ok(src_content), Ok(dst_content)) => {
-                // 尝试作为 JSON 合并
-                if let (Ok(mut src_json), Ok(mut dst_json)) = (
-                    serde_json::from_str::<serde_json::Value>(&src_content),
-                    serde_json::from_str::<serde_json::Value>(&dst_content)
-                ) {
-                    if let (Some(src_obj), Some(dst_obj)) = (src_json.as_object_mut(), dst_json.as_object_mut()) {
-                        // 将源对象的键值合并到目标对象
-                        for (key, value) in src_obj.iter() {
-                            if !dst_obj.contains_key(key) {
-                                dst_obj.insert(key.clone(), value.clone());
-                            }
-                        }
-                        
-                        // 写回目标文件
-                        let merged_content = serde_json::to_string_pretty(&dst_json)?;
-                        fs::write(dst, merged_content)?;
-                        return Ok(());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    
-    // 其他情况：如果目标不存在则复制，否则保留目标
-    if !dst.exists() {
-        fs::copy(src, dst)?;
-    }
-    
-    Ok(())
 }
 
 /// 递归复制目录
