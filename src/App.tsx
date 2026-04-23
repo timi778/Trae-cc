@@ -42,6 +42,7 @@ function App() {
   const [emailFilter, setEmailFilter] = useState("");
   const [quotaFilter, setQuotaFilter] = useState<"all" | "with" | "without">("all");
   const [showBatchDropdown, setShowBatchDropdown] = useState(false);
+  const [preserveContext, setPreserveContext] = useState(false);
 
   // Toast 通知状态
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -75,6 +76,13 @@ function App() {
     accountId: string;
     accountName: string;
     initialEmail?: string;
+  } | null>(null);
+
+  const [preserveContextSwitchTarget, setPreserveContextSwitchTarget] = useState<{
+    id: string;
+    name: string;
+    email: string;
+    isCurrent?: boolean;
   } | null>(null);
 
   // 更新弹窗状态
@@ -558,6 +566,11 @@ function App() {
     }
   };
 
+  // 重新应用登录（重启 IDE）
+  const handleReapplyLogin = async (accountId: string) => {
+    await handleSwitchAccount(accountId, { mode: "relogin" });
+  };
+
   // 切换账号 / 重新登录（同逻辑）
   const handleSwitchAccount = async (
     accountId: string,
@@ -593,7 +606,11 @@ function App() {
         setConfirmModal(null);
         addToast("info", infoToast);
         try {
-          await api.switchAccount(accountId);
+          if (mode === "switch" && preserveContext) {
+            await api.switchAccountPreserveContext(accountId);
+          } else {
+            await api.switchAccount(accountId, { force });
+          }
           await loadAccounts();
           addToast("success", successToast);
         } catch (err: any) {
@@ -601,6 +618,42 @@ function App() {
         }
       },
     });
+  };
+
+  const handleOpenPreserveContextSwitch = (accountId: string) => {
+    const account = accounts.find((a) => a.id === accountId);
+    if (!account || account.is_current) {
+      return;
+    }
+
+    setPreserveContextSwitchTarget({
+      id: account.id,
+      name: account.name,
+      email: account.email,
+      isCurrent: account.is_current,
+    });
+  };
+
+  const handleConfirmPreserveContextSwitch = async () => {
+    const target = preserveContextSwitchTarget;
+    if (!target) return;
+
+    const pathValid = await checkAndSetTraePath();
+    if (!pathValid) {
+      addToast("error", "未设置 Trae IDE 路径，无法切换账号");
+      return;
+    }
+
+    setPreserveContextSwitchTarget(null);
+    addToast("info", "正在切换账号并保留当前上下文，请稍候...");
+
+    try {
+      await api.switchAccountPreserveContext(target.id);
+      await loadAccounts();
+      addToast("success", "保留上下文切换完成");
+    } catch (err: any) {
+      addToast("error", err.message || "保留上下文切换失败");
+    }
   };
 
   // 查看详情
@@ -648,7 +701,7 @@ function App() {
     }
   };
 
-  const handleRelogin = async (
+  const handleSessionRelogin = async (
     accountId: string,
     options?: { forceManual?: boolean; source?: "update-token" | "relogin"; suppressToast?: boolean }
   ) => {
@@ -724,7 +777,7 @@ function App() {
       updateUsageCache({ [accountId]: usage });
       addToast("success", "Token 已更新", 1500, "update-token-success");
     } catch (err: any) {
-      void handleRelogin(accountId, {
+      void handleSessionRelogin(accountId, {
         source: "update-token",
         forceManual: true,
         suppressToast: true,
@@ -1026,7 +1079,7 @@ function App() {
 
   return (
     <div className="app">
-      <Sidebar currentPage={currentPage} onNavigate={setCurrentPage} onAddAccount={() => setShowAddModal(true)} />
+      <Sidebar currentPage={currentPage} onNavigate={setCurrentPage} />
 
       <div className="app-content">
         {error && (
@@ -1088,38 +1141,66 @@ function App() {
                         <polyline points="6 9 12 15 18 9"/>
                       </svg>
                     </div>
-                    <div className="view-toggle">
-                      <button
-                        className={`view-btn ${viewMode === "grid" ? "active" : ""}`}
-                        onClick={() => setViewMode("grid")}
-                        title="卡片视图"
+                    <div className="view-select-wrapper">
+                      <select
+                        className="view-select"
+                        value={viewMode}
+                        onChange={(e) => setViewMode(e.target.value as ViewMode)}
+                        title="切换视图"
                       >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-                          <rect x="3" y="3" width="7" height="7"/>
-                          <rect x="14" y="3" width="7" height="7"/>
-                          <rect x="3" y="14" width="7" height="7"/>
-                          <rect x="14" y="14" width="7" height="7"/>
-                        </svg>
-                      </button>
-                      <button
-                        className={`view-btn ${viewMode === "list" ? "active" : ""}`}
-                        onClick={() => setViewMode("list")}
-                        title="列表视图"
-                      >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-                          <line x1="8" y1="6" x2="21" y2="6"/>
-                          <line x1="8" y1="12" x2="21" y2="12"/>
-                          <line x1="8" y1="18" x2="21" y2="18"/>
-                          <line x1="3" y1="6" x2="3.01" y2="6"/>
-                          <line x1="3" y1="12" x2="3.01" y2="12"/>
-                          <line x1="3" y1="18" x2="3.01" y2="18"/>
-                        </svg>
-                      </button>
+                        <option value="grid">卡片</option>
+                        <option value="list">列表</option>
+                      </select>
+                      <svg className="view-select-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
                     </div>
                   </div>
                   
-                  {/* 右侧 - 更多操作 */}
+                  {/* 右侧 - 添加账号 + 更多操作 */}
                   <div className="toolbar-right">
+                    {/* 保留上下文开关 */}
+                    <div className="preserve-context-wrapper">
+                      <span className="preserve-context-label">保留上下文</span>
+                      <label className="preserve-context-toggle" title="切换账号时保留IDE上下文">
+                        <input
+                          type="checkbox"
+                          checked={preserveContext}
+                          onChange={(e) => setPreserveContext(e.target.checked)}
+                        />
+                        <span className="toggle-slider"></span>
+                      </label>
+                    </div>
+                    {/* 添加账号按钮 */}
+                    <button
+                      className="header-btn add-account-btn"
+                      onClick={() => setShowAddModal(true)}
+                      style={{ 
+                        padding: "8px 16px", 
+                        fontSize: "13px",
+                        background: "var(--gradient-accent)",
+                        color: "#ffffff",
+                        border: "none",
+                        fontWeight: 600,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px"
+                      }}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        width="14"
+                        height="14"
+                      >
+                        <line x1="12" y1="5" x2="12" y2="19"/>
+                        <line x1="5" y1="12" x2="19" y2="12"/>
+                      </svg>
+                      添加账号
+                    </button>
+
                     {/* 更多操作下拉按钮 */}
                     <div ref={batchDropdownRef} className="batch-dropdown-container">
                       <button
@@ -1281,6 +1362,10 @@ function App() {
                       onSelect={handleSelectAccount}
                       onContextMenu={handleContextMenu}
                       onToast={addToast}
+                      onRefresh={handleRefreshAccount}
+                      onSwitchAccount={handleSwitchAccount}
+                      onViewDetail={handleViewDetail}
+                      onRelogin={handleReapplyLogin}
                     />
                   ))}
                 </div>
@@ -1347,28 +1432,12 @@ function App() {
           x={contextMenu.x}
           y={contextMenu.y}
           onClose={() => setContextMenu(null)}
-          onRelogin={() => {
-            handleSwitchAccount(contextMenu.accountId, { mode: "relogin" });
-            setContextMenu(null);
-          }}
-          onViewDetail={() => {
-            void handleViewDetail(contextMenu.accountId);
-            setContextMenu(null);
-          }}
-          onRefresh={() => {
-            handleRefreshAccount(contextMenu.accountId);
-            setContextMenu(null);
-          }}
           onUpdateToken={() => {
             void handleUpdateToken(contextMenu.accountId);
             setContextMenu(null);
           }}
           onCopyToken={() => {
             handleCopyToken(contextMenu.accountId);
-            setContextMenu(null);
-          }}
-          onSwitchAccount={() => {
-            handleSwitchAccount(contextMenu.accountId);
             setContextMenu(null);
           }}
           onBuyPro={() => {
@@ -1379,8 +1448,59 @@ function App() {
             handleDeleteAccount(contextMenu.accountId);
             setContextMenu(null);
           }}
-          isCurrent={accounts.find(a => a.id === contextMenu.accountId)?.is_current || false}
         />
+      )}
+
+      {preserveContextSwitchTarget && (
+        <div className="modal-overlay" onClick={() => setPreserveContextSwitchTarget(null)}>
+          <div
+            className="preserve-context-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="preserve-context-modal-header">
+              <div className="preserve-context-modal-icon">↔</div>
+              <div>
+                <h3>切换账号（保留上下文）</h3>
+                <p>会把当前账号在 Trae 里的上下文信息迁移到目标账号，再按软件里配置的路径重启 Trae。</p>
+              </div>
+            </div>
+
+            <div className="preserve-context-summary">
+              <span className="preserve-context-status">准备执行</span>
+              <span className="preserve-context-target">
+                目标账号：{preserveContextSwitchTarget.email || preserveContextSwitchTarget.name}
+              </span>
+            </div>
+
+            <div className="preserve-context-card">
+              <div className="preserve-context-card-title">执行内容</div>
+              <ul className="preserve-context-list">
+                <li>关闭当前 Trae 进程，避免写入中的配置被占用。</li>
+                <li>将 `storage.json` 里当前使用账号的 UID 替换为目标账号 UID。</li>
+                <li>写入目标账号登录态，并使用软件内配置的 Trae 路径重新启动。</li>
+              </ul>
+            </div>
+
+            <div className="preserve-context-note">
+              切换过程中会自动关闭并重新启动 Trae，请先保存好正在编辑但尚未落盘的内容。
+            </div>
+
+            <div className="preserve-context-actions">
+              <button
+                className="header-btn"
+                onClick={() => setPreserveContextSwitchTarget(null)}
+              >
+                取消
+              </button>
+              <button
+                className="add-btn preserve-context-primary"
+                onClick={handleConfirmPreserveContextSwitch}
+              >
+                确认切换
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 添加账号弹窗 */}

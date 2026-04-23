@@ -5,6 +5,8 @@ description = "Trae账号管理 - 管理 Trae 订阅账号使用量"
 authors = ["HJH"]
 edition = "2021"
 
+[workspace]
+
 [lib]
 name = "trae_auto_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -22,6 +24,7 @@ tokio = { version = "1", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 anyhow = "1"
+libloading = "0.8"
 regex = "1"
 rand = "0.8"
 directories = "5"
@@ -35,6 +38,7 @@ hex = "0.4"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
+trae-vv = { path = "../../Trae-vv" }
 
 # Logging dependencies
 tauri-plugin-log = "2"

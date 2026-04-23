@@ -17,9 +17,13 @@ interface AccountCardProps {
   onSelect: (id: string) => void;
   onContextMenu: (e: React.MouseEvent, id: string) => void;
   onToast?: (type: "success" | "error" | "warning" | "info", message: string, duration?: number) => void;
+  onRefresh?: (id: string) => void;
+  onSwitchAccount?: (id: string) => void;
+  onViewDetail?: (id: string) => void;
+  onRelogin?: (id: string) => void;
 }
 
-export function AccountCard({ account, usage, selected, onSelect, onContextMenu, onToast }: AccountCardProps) {
+export function AccountCard({ account, usage, selected, onSelect, onContextMenu, onToast, onRefresh, onSwitchAccount, onViewDetail, onRelogin }: AccountCardProps) {
   const [copied, setCopied] = useState(false);
   const getUsageLevel = (used: number, limit: number) => {
     if (limit === 0) return "low";
@@ -123,9 +127,7 @@ export function AccountCard({ account, usage, selected, onSelect, onContextMenu,
               </svg>
             </button>
           </div>
-          <div className="card-id" style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
-            UID: {account.user_id || account.id}
-          </div>
+
           <div className="card-badges">
             {(usage?.plan_type || account.plan_type) !== "Free" && (
               <span className="badge pro">PRO</span>
@@ -264,11 +266,67 @@ export function AccountCard({ account, usage, selected, onSelect, onContextMenu,
         )}
       </div>
 
-      <div className="card-footer">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>
-        </svg>
-        右键查看更多操作
+      <div className="card-actions">
+        <button
+          className="card-action-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRefresh?.(account.id);
+          }}
+          title="刷新数据"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+          </svg>
+          刷新数据
+        </button>
+        {account.is_current ? (
+          <button
+            className="card-action-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRelogin?.(account.id);
+            }}
+            title="重新登录"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+              <polyline points="10 17 15 12 10 7"/>
+              <line x1="15" y1="12" x2="3" y2="12"/>
+            </svg>
+            重新登录
+          </button>
+        ) : (
+          onSwitchAccount && (
+            <button
+              className="card-action-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSwitchAccount(account.id);
+              }}
+              title="切换账号"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M16 3h3v3h-3zM8 3h3v3H8zM5 8h14v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V8zm4 4v6M12 12v6"/>
+              </svg>
+              切换账号
+            </button>
+          )
+        )}
+        <button
+          className="card-action-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            onViewDetail?.(account.id);
+          }}
+          title="查看详情"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          查看详情
+        </button>
       </div>
     </div>
   );

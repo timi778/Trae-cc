@@ -123,25 +123,9 @@ export interface StatsResponse {
   message: string;
 }
 
-// 今日统计响应
-export interface TodayAnalyticsResponse {
-  success: boolean;
-  data: {
-    today_new_users: number;
-    cumulative_since_0420: number;
-  };
-}
-
 // ============ 快速注册 API ============
 
 import type { Account } from "../types";
-
-export async function quickRegister(showWindow?: boolean): Promise<Account> {
-  if (typeof showWindow === "boolean") {
-    return invoke("quick_register", { showWindow });
-  }
-  return invoke("quick_register");
-}
 
 // 使用自定义临时邮箱进行快速注册
 export async function quickRegisterWithCustomTempMail(showWindow?: boolean): Promise<Account> {
@@ -196,14 +180,6 @@ export async function getTaskStatus(ticket: string): Promise<TaskStatusResponse>
 export async function claimResource(ticket: string, inviteCode?: string): Promise<ClaimResourceResponse> {
   // 通过 Tauri 命令调用 Rust 后端，绕过 CORS 限制
   return invoke("quick_register_claim_resource", { ticket, inviteCode });
-}
-
-/**
- * 获取今日新用户统计
- * @returns 今日统计响应
- */
-export async function getTodayAnalytics(): Promise<TodayAnalyticsResponse> {
-  return invoke("get_today_analytics");
 }
 
 /**

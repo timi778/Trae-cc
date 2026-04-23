@@ -54,6 +54,14 @@ export async function switchAccount(
   return invoke("switch_account", { accountId, force: options?.force });
 }
 
+// 切换账号（保留上下文）
+export async function switchAccountPreserveContext(
+  accountId: string,
+  options?: { force?: boolean }
+): Promise<void> {
+  return invoke("switch_account_preserve_context", { accountId, force: options?.force });
+}
+
 // 获取账号使用量
 export async function getAccountUsage(accountId: string): Promise<UsageSummary> {
   return invokeNetwork("get_account_usage", { accountId });

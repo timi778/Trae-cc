@@ -137,18 +137,6 @@ pub struct ClaimResourceNewResponse {
     pub code: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TodayAnalyticsResponse {
-    pub success: bool,
-    pub data: TodayAnalyticsData,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TodayAnalyticsData {
-    pub today_new_users: i32,
-    pub cumulative_since_0420: i32,
-}
-
 // 获取今日新用户统计
 #[tauri::command]
 pub async fn quick_register_create_task(
@@ -383,94 +371,4 @@ pub async fn claim_resource_with_token(
     Err(ApiError::from(anyhow::anyhow!("使用 Token 声明资源功能未实现")))
 }
 
-#[tauri::command]
-pub async fn get_today_analytics() -> Result<serde_json::Value, ApiError> {
-    // 从环境变量获取后端 API 地址（使用 VITE_ 前缀，与前端一致）
-    let api_base = std::env::var("VITE_QUICK_REGISTER_API_BASE")
-        .unwrap_or_else(|_| "https://hhxyyq.online".to_string());
-    
-    // 获取认证信息
-    let app_id = std::env::var("VITE_APP_ID").unwrap_or_else(|_| "trae_email".to_string());
-    let app_secret = std::env::var("VITE_APP_SECRET").unwrap_or_else(|_| "trae_email_secret_key_2026".to_string());
-    
-    // 调用后端 API 获取今日统计
-    let client = reqwest::Client::new();
-    let url = format!("{}/api/analytics/today_new_users", api_base);
-    
-    match client
-        .get(&url)
-        .header("X-App-ID", app_id)
-        .header("X-App-Secret", app_secret)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-    {
-        Ok(response) => {
-            let status = response.status();
-            match response.text().await {
-                Ok(text) => {
-                    log::info!("Analytics API response ({}): {}", status, text);
-                    match serde_json::from_str::<serde_json::Value>(&text) {
-                        Ok(data) => {
-                            // 解析后端返回的数据
-                            let today_new_users = data
-                                .get("data")
-                                .and_then(|d| d.get("today_new_users"))
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(0);
-                            
-                            let cumulative_since_0420 = data
-                                .get("data")
-                                .and_then(|d| d.get("cumulative_since_0420"))
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(0);
-                            
-                            log::info!("Parsed analytics: today_new_users={}, cumulative_since_0420={}", 
-                                today_new_users, cumulative_since_0420);
-                            
-                            Ok(serde_json::json!({
-                                "success": true,
-                                "data": {
-                                    "today_new_users": today_new_users,
-                                    "cumulative_since_0420": cumulative_since_0420,
-                                }
-                            }))
-                }
-                        Err(e) => {
-                            log::warn!("解析今日统计响应失败: {}, raw text: {}", e, text);
-                            // 返回默认值
-                            Ok(serde_json::json!({
-                                "success": true,
-                                "data": {
-                                    "today_new_users": 0,
-                                    "cumulative_since_0420": 0,
-                                }
-                            }))
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!("读取今日统计响应失败: {}", e);
-                    Ok(serde_json::json!({
-                        "success": true,
-                        "data": {
-                            "today_new_users": 0,
-                            "cumulative_since_0420": 0,
-                        }
-                    }))
-                }
-            }
-        }
-        Err(e) => {
-            log::warn!("获取今日统计失败: {}", e);
-            // API 调用失败时返回默认值
-            Ok(serde_json::json!({
-                "success": true,
-                "data": {
-                    "today_new_users": 0,
-                    "cumulative_since_0420": 0,
-                }
-            }))
-        }
-    }
-}
+

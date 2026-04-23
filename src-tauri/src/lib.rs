@@ -5,11 +5,11 @@ mod api;
 mod account;
 mod autostart;
 mod machine;
-mod privacy;
 mod browser_auto_login;
 mod logger;
 mod custom_tempmail;
 mod quick_register_backend;
+mod vv_bridge;
 
 use std::collections::HashMap;
 use anyhow::anyhow;
@@ -17,7 +17,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use serde::Deserialize;
 
 use reqwest::Client;
 use tokio::io::AsyncWriteExt;
@@ -277,20 +276,6 @@ async fn download_and_run_installer(url: String) -> Result<String> {
 
     Ok(dest_path.to_string_lossy().to_string())
 }
-
-
-
-#[tauri::command]
-async fn quick_register(
-    _app: AppHandle,
-    showWindow: bool,
-    _state: State<'_, AppState>,
-) -> Result<Account> {
-    // 快速注册功能已禁用，请使用 quick_register_with_custom_tempmail
-    let _ = showWindow;
-    Err(ApiError::from(anyhow::anyhow!("快速注册功能已禁用，请在设置中配置自定义临时邮箱后使用新功能")))
-}
-
 /// 使用自定义临时邮箱进行快速注册
 #[tauri::command]
 async fn quick_register_with_custom_tempmail(
@@ -1418,79 +1403,61 @@ async fn get_account(account_id: String, state: State<'_, AppState>) -> Result<A
     manager.get_account(&account_id).map_err(ApiError::from)
 }
 
-/// 切换账号（设置活跃账号并更新机器码）
 #[tauri::command]
 async fn switch_account(account_id: String, force: Option<bool>, state: State<'_, AppState>) -> Result<()> {
     log::info!("Switching account: {}", account_id);
+    let force = force.unwrap_or(false);
+    let account_id_for_dll = account_id.clone();
+    let switch_result = tokio::task::spawn_blocking(move || {
+        vv_bridge::execute_account_flow(&account_id_for_dll, "switch", force, true)
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("调用 Trae-vv 线程失败: {}", e)))?;
+
+    if let Err(e) = switch_result {
+        log::error!("Failed to switch account via Trae-vv: {}", e);
+        return Err(ApiError::from(e));
+    }
+
     {
         let mut manager = state.account_manager.lock().await;
-        let force = force.unwrap_or(false);
-        if let Err(e) = manager.switch_account(&account_id, force).await {
-            log::error!("Failed to switch account: {}", e);
+        if let Err(e) = manager.reload_from_disk() {
+            log::error!("Failed to reload account store after DLL switch: {}", e);
             return Err(ApiError::from(e));
         }
-        log::info!("Account switched successfully");
+    }
+    log::info!("Account switched successfully");
+    Ok(())
+}
+
+#[tauri::command]
+async fn switch_account_preserve_context(
+    account_id: String,
+    force: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<()> {
+    log::info!("Switching account with preserved context: {}", account_id);
+    let force = force.unwrap_or(false);
+    let account_id_for_dll = account_id.clone();
+    let switch_result = tokio::task::spawn_blocking(move || {
+        vv_bridge::execute_account_flow(&account_id_for_dll, "preserve_context", force, true)
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("调用 Trae-vv 线程失败: {}", e)))?;
+
+    if let Err(e) = switch_result {
+        log::error!("Failed to switch account with preserved context via Trae-vv: {}", e);
+        return Err(ApiError::from(e));
     }
 
-    let settings = state.settings.lock().await.clone();
-    if settings.privacy_auto_enable {
-        log::info!("Waiting for Trae IDE to start before writing privacy settings");
-        let db_path = match machine::get_trae_state_db_path() {
-            Ok(path) => path,
-            Err(err) => {
-                log::error!("Failed to find Trae database: {}", err);
-                // 即使查找数据库失败，也尝试启动 Trae
-                let _ = tokio::task::spawn_blocking(|| {
-                    let _ = machine::open_trae();
-                }).await;
-                return Ok(());
-            }
-        };
-        
-        // 先启动 Trae，等待数据库文件生成
-        let db_path_clone = db_path.clone();
-        let start_result = tokio::task::spawn_blocking(move || {
-            // 启动 Trae
-            if let Err(e) = machine::open_trae() {
-                println!("[ERROR] 启动 Trae IDE 失败: {}", e);
-                return Err(e);
-            }
-            
-            // 等待数据库文件存在（最多等待 30 秒）
-            let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(30);
-            while !db_path_clone.exists() {
-                if start.elapsed() > timeout {
-                    return Err(anyhow::anyhow!("等待 Trae 数据库超时"));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            
-            Ok(())
-        }).await;
-        
-        match start_result {
-            Ok(Ok(())) => {
-                // Trae 启动成功，数据库文件已生成，现在写入隐私模式
-                let result = tokio::task::spawn_blocking(move || {
-                    privacy::enable_privacy_mode_at_path_with_path(db_path, || {
-                        machine::kill_trae()?;
-                        machine::open_trae()
-                    })
-                }).await;
-
-                let _ = result;
-            }
-            Ok(Err(_)) => {}
-            Err(_) => {}
+    {
+        let mut manager = state.account_manager.lock().await;
+        if let Err(e) = manager.reload_from_disk() {
+            log::error!("Failed to reload account store after DLL switch: {}", e);
+            return Err(ApiError::from(e));
         }
-    } else {
-        // 隐私模式未启用，直接启动 Trae
-        let _ = tokio::task::spawn_blocking(|| {
-            let _ = machine::open_trae();
-        }).await;
     }
-
+    log::info!("Account switched with preserved context successfully");
     Ok(())
 }
 
@@ -1689,9 +1656,16 @@ async fn get_usage_events(
 /// 从 Trae IDE 读取账号
 #[tauri::command]
 async fn read_trae_account(state: State<'_, AppState>) -> Result<Option<Account>> {
+    let account = tokio::task::spawn_blocking(vv_bridge::read_trae_account)
+        .await
+        .map_err(|err| ApiError {
+            message: format!("读取 Trae 账号任务失败: {}", err),
+        })?
+        .map_err(ApiError::from)?;
+
     let mut manager = state.account_manager.lock().await;
-    let res: Result<Option<Account>> = manager.read_trae_ide_account().await.map_err(ApiError::from);
-    res
+    manager.reload_from_disk().map_err(ApiError::from)?;
+    Ok(account)
 }
 
 /// 获取当前系统机器码
@@ -1734,7 +1708,7 @@ async fn set_trae_machine_id(machine_id: String) -> Result<()> {
 /// 清除 Trae IDE 登录状态（使 IDE 变成全新安装状态）
 #[tauri::command]
 async fn clear_trae_login_state() -> Result<()> {
-    machine::clear_trae_login_state().map_err(ApiError::from)
+    vv_bridge::clear_login_state().map_err(ApiError::from)
 }
 
 /// 获取保存的 Trae IDE 路径
@@ -2474,15 +2448,6 @@ fn normalize_request_url(url: &str) -> Option<Url> {
         .ok()
 }
 
-fn is_token_expired(expired_at: Option<&str>) -> bool {
-    match expired_at.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(value) => chrono::DateTime::parse_from_rfc3339(value)
-            .map(|dt| dt.with_timezone(&chrono::Utc) <= chrono::Utc::now())
-            .unwrap_or(true),
-        None => false,
-    }
-}
-
 async fn handle_silent_start() -> anyhow::Result<()> {
     let mut manager = AccountManager::new()?;
     
@@ -2496,63 +2461,8 @@ async fn handle_silent_start() -> anyhow::Result<()> {
 
     // 2. Sync with Trae IDE if it's not running
     if !machine::is_trae_running() {
-        let accounts = manager.get_accounts();
-        if let Some(current) = accounts.iter().find(|a| a.is_current) {
-             let resolved_region = manager.ensure_account_region(&current.id).await.unwrap_or_default();
-             if let Ok(account) = manager.get_account(&current.id) {
-                let token = match account.jwt_token.clone().filter(|v| !v.trim().is_empty()) {
-                    Some(token) => token,
-                    None => {
-                        println!("[WARN] 静默同步跳过：当前账号缺少有效 Token");
-                        return Ok(());
-                    }
-                };
-
-                if is_token_expired(account.token_expired_at.as_deref()) {
-                    println!("[WARN] 静默同步跳过：当前账号 Token 已过期，避免写回失效登录态");
-                    return Ok(());
-                }
-
-                if account.token_expired_at.is_none() {
-                    match TraeApiClient::new_with_token(&token) {
-                        Ok(client) => {
-                            if let Err(err) = client.validate_token_alive().await {
-                                println!(
-                                    "[WARN] 静默同步跳过：当前账号 Token 缺少过期时间且服务端校验失败，避免写回失效登录态: {}",
-                                    err
-                                );
-                                return Ok(());
-                            }
-                        }
-                        Err(err) => {
-                            println!(
-                                "[WARN] 静默同步跳过：当前账号 Token 格式无效，避免写回失效登录态: {}",
-                                err
-                            );
-                            return Ok(());
-                        }
-                    }
-                }
-
-                if resolved_region.is_empty() {
-                    println!("[WARN] 静默同步跳过：无法确定账号区域，避免写入默认区域导致区服不一致");
-                    return Ok(());
-                }
-
-                let login_info = machine::TraeLoginInfo {
-                    token,
-                    refresh_token: None,
-                    user_id: account.user_id,
-                    email: account.email,
-                    username: account.name,
-                    avatar_url: account.avatar_url,
-                    host: String::new(),
-                    region: resolved_region,
-                };
-                if let Err(err) = machine::write_trae_login_info(&login_info) {
-                    println!("[WARN] 静默同步写入 Trae 登录态失败: {}", err);
-                }
-            }
+        if let Err(err) = vv_bridge::sync_current_account(false) {
+            println!("[WARN] 静默同步当前账号到 Trae 失败: {}", err);
         }
     }
 
@@ -2654,7 +2564,6 @@ pub fn run() {
             get_settings,
             update_settings,
             download_and_run_installer,
-            quick_register,
             quick_register_with_custom_tempmail,
             start_browser_login,
             finish_browser_login,
@@ -2664,6 +2573,7 @@ pub fn run() {
             get_accounts,
             get_account,
             switch_account,
+            switch_account_preserve_context,
             get_account_usage,
             update_account_token,
             refresh_token,
@@ -2705,7 +2615,6 @@ pub fn run() {
             quick_register_backend::exchange_pc_token,
             quick_register_backend::get_user_info,
             quick_register_backend::claim_resource_with_token,
-            quick_register_backend::get_today_analytics,
         ])
         .setup(|app| {
             // 获取主窗口并显示
