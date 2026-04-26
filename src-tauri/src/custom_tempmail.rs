@@ -156,13 +156,21 @@ impl CustomTempMailClient {
             
             Ok(code_response.code)
         } else if status.as_u16() == 404 {
-            let error: ErrorResponse = serde_json::from_str(&text)
-                .unwrap_or(ErrorResponse { error: "未收到邮件".to_string() });
-            Err(anyhow::anyhow!("404: {}", error.error))
+            let error_json: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+            let error_msg = error_json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未收到邮件");
+            Err(anyhow::anyhow!("{}", error_msg))
         } else {
-            let error: ErrorResponse = serde_json::from_str(&text)
-                .unwrap_or(ErrorResponse { error: format!("HTTP {}", status) });
-            Err(anyhow::anyhow!("{}", error.error))
+            let error_json: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+            let error_msg = error_json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&text);
+            Err(anyhow::anyhow!("{}", error_msg))
         }
     }
 }

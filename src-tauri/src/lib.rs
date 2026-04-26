@@ -769,6 +769,18 @@ fn build_browser_login_script(port: u16) -> String {
       fetch(url, { mode: "no-cors" });
     }
   };
+  const sendLog = (message) => {
+    try {
+      const params = new URLSearchParams();
+      params.append("log", String(message || ""));
+      const url = callback + "?" + params.toString();
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(url);
+      } else {
+        fetch(url, { mode: "no-cors" });
+      }
+    } catch {}
+  };
   const syncCredentials = () => {
     if (!capturedEmail && !capturedPassword) return;
     if (capturedEmail === lastSentEmail && capturedPassword === lastSentPassword) return;
@@ -804,44 +816,114 @@ fn build_browser_login_script(port: u16) -> String {
     if (lower.includes("terms") || lower.includes("privacy")) return false;
     return true;
   };
+  const looksLikeJwt = (value) => {
+    if (!value || typeof value !== "string") return false;
+    const trimmed = value.trim();
+    if (trimmed.length < 60) return false;
+    const parts = trimmed.split(".");
+    if (parts.length !== 3) return false;
+    if (!parts[0] || !parts[1] || !parts[2]) return false;
+    if (!/^[A-Za-z0-9\-_]+$/.test(parts[0])) return false;
+    if (!/^[A-Za-z0-9\-_]+$/.test(parts[1])) return false;
+    return true;
+  };
+  const findTokenDeep = (data, depth) => {
+    if (!data || depth > 5) return null;
+    if (typeof data === "string") {
+      return looksLikeJwt(data) ? data.trim() : null;
+    }
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        const t = findTokenDeep(item, depth + 1);
+        if (t) return t;
+      }
+      return null;
+    }
+    if (typeof data !== "object") return null;
+    const keys = Object.keys(data);
+    const prioritized = [];
+    const rest = [];
+    for (const key of keys) {
+      const lower = normalize(key);
+      if (
+        lower.includes("token") ||
+        lower.includes("jwt") ||
+        lower.includes("id_token") ||
+        lower.includes("access_token") ||
+        lower.includes("session")
+      ) {
+        prioritized.push(key);
+      } else {
+        rest.push(key);
+      }
+    }
+    for (const key of prioritized.concat(rest)) {
+      try {
+        const val = data[key];
+        const t = findTokenDeep(val, depth + 1);
+        if (t) return t;
+      } catch {}
+    }
+    return null;
+  };
   const parseToken = (data) => {
     if (!data) return null;
-    return (
+    const direct =
+      data.token ||
+      data.Token ||
+      data.access_token ||
+      data.id_token ||
+      data.jwt ||
+      data.jwt_token ||
+      data.data?.token ||
+      data.data?.Token ||
+      data.data?.access_token ||
+      data.data?.id_token ||
       data.result?.token ||
       data.result?.Token ||
+      data.result?.access_token ||
+      data.result?.id_token ||
       data.Result?.token ||
       data.Result?.Token ||
-      null
-    );
+      data.Result?.access_token ||
+      data.Result?.id_token;
+    if (looksLikeJwt(direct)) return direct.trim();
+    const deep = findTokenDeep(data, 0);
+    if (deep) return deep;
+    return null;
   };
 
   const markLoginTriggered = () => {
     loginTriggered = true;
   };
-
-  const scanLocalStorage = () => {
-    try {
-      const storages = [localStorage, sessionStorage];
-      storages.forEach(storage => {
-        for (let i = 0; i < storage.length; i++) {
-          const key = storage.key(i);
-          if (key && (key.toLowerCase().includes("token") || key.toLowerCase().includes("auth") || key.toLowerCase().includes("user"))) {
-            const val = storage.getItem(key);
-            if (val && typeof val === "string" && val.startsWith("ey") && val.split(".").length === 3) {
-              sendToken(val, "storage:" + key);
-            }
-          }
-        }
-      });
-    } catch (e) {}
+  const tryParseTokenFromText = (text) => {
+    if (!text || typeof text !== "string") return null;
+    const candidates = text.match(/[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+/g);
+    if (!candidates || candidates.length === 0) return null;
+    for (const token of candidates) {
+      if (looksLikeJwt(token)) return token.trim();
+    }
+    return null;
   };
-  scanLocalStorage();
-  setInterval(scanLocalStorage, 2000);
-
+  const safeJson = async (res) => {
+    try {
+      return await res.clone().json();
+    } catch {
+      return null;
+    }
+  };
+  const safeText = async (res) => {
+    try {
+      return await res.clone().text();
+    } catch {
+      return "";
+    }
+  };
   const tryFetch = async () => {
     const endpoints = [
       "https://api-sg-central.trae.ai/cloudide/api/v3/common/GetUserToken",
-      "https://api-us-east.trae.ai/cloudide/api/v3/common/GetUserToken"
+      "https://api-us-east.trae.ai/cloudide/api/v3/common/GetUserToken",
+      "https://ug-normal.trae.ai/cloudide/api/v3/common/GetUserToken"
     ];
     const headers = {
       "content-type": "application/json",
@@ -857,7 +939,7 @@ fn build_browser_login_script(port: u16) -> String {
           headers,
           body: "{}"
         });
-        const data = await res.json();
+        const data = await safeJson(res);
         const token = parseToken(data);
         if (token) {
           sendToken(token, res.url);
@@ -865,6 +947,62 @@ fn build_browser_login_script(port: u16) -> String {
         }
       } catch {}
     }
+  };
+  const checkAllStorage = () => {
+    const checkStorage = (storage, tag) => {
+      if (!storage) return null;
+      try {
+        for (let i = 0; i < storage.length; i++) {
+          const key = storage.key(i);
+          if (!key) continue;
+          const value = storage.getItem(key);
+          if (!value) continue;
+          if (looksLikeJwt(value)) return { token: value.trim(), source: tag + ":" + key };
+          const textToken = tryParseTokenFromText(value);
+          if (textToken) return { token: textToken, source: tag + ":" + key };
+          if ((value.startsWith("{") && value.endsWith("}")) || (value.startsWith("[") && value.endsWith("]"))) {
+            try {
+              const parsed = JSON.parse(value);
+              const nested = parseToken(parsed);
+              if (nested) return { token: nested, source: tag + ":" + key };
+            } catch {}
+          }
+        }
+      } catch {}
+      return null;
+    };
+    const hit =
+      checkStorage(window.localStorage, "localStorage") ||
+      checkStorage(window.sessionStorage, "sessionStorage");
+    if (hit && hit.token) {
+      sendLog("Token found in storage: " + hit.source);
+      sendToken(hit.token, hit.source);
+      return true;
+    }
+    try {
+      for (const key in window) {
+        try {
+          const val = window[key];
+          if (typeof val === "string" && looksLikeJwt(val)) {
+            sendLog("Token found in window: " + key);
+            sendToken(val.trim(), "window:" + key);
+            return true;
+          }
+        } catch {}
+      }
+    } catch {}
+    return false;
+  };
+  const isInterestingUrl = (url) => {
+    const u = normalize(url || "");
+    if (!u) return false;
+    if (u.includes("getusertoken")) return true;
+    if (u.includes("/cloudide/api/")) return true;
+    if (u.includes("/passport/")) return true;
+    if (u.includes("/auth")) return true;
+    if (u.includes("token")) return true;
+    if (u.includes("login")) return true;
+    return false;
   };
 
   const hookFetch = () => {
@@ -881,10 +1019,22 @@ fn build_browser_login_script(port: u16) -> String {
       } catch {}
       const res = await orig(...args);
       try {
-        if (typeof res.url === "string" && res.url.includes("GetUserToken")) {
-          const data = await res.clone().json();
+        const resUrl = typeof res.url === "string" ? res.url : "";
+        const targetUrl = resUrl || (args[0] instanceof Request ? args[0].url : args[0]);
+        if (isInterestingUrl(targetUrl)) {
+          const data = await safeJson(res);
           const token = parseToken(data);
-          if (token) sendToken(token, res.url);
+          if (token) {
+            sendLog("Token extracted from fetch: " + String(targetUrl));
+            sendToken(token, String(targetUrl));
+          } else {
+            const text = await safeText(res);
+            const textToken = tryParseTokenFromText(text);
+            if (textToken) {
+              sendLog("Token extracted from fetch text: " + String(targetUrl));
+              sendToken(textToken, String(targetUrl));
+            }
+          }
         }
       } catch {}
       return res;
@@ -904,10 +1054,19 @@ fn build_browser_login_script(port: u16) -> String {
       } catch {}
       this.addEventListener("load", function() {
         try {
-          if ((this.__trae_url || "").includes("GetUserToken")) {
-            const data = JSON.parse(this.responseText);
-            const token = parseToken(data);
-            if (token) sendToken(token, this.__trae_url);
+          const url = this.__trae_url || "";
+          if (isInterestingUrl(url)) {
+            let token = null;
+            try {
+              const data = JSON.parse(this.responseText);
+              token = parseToken(data);
+            } catch {
+              token = tryParseTokenFromText(this.responseText);
+            }
+            if (token) {
+              sendLog("Token extracted from XHR: " + String(url));
+              sendToken(token, String(url));
+            }
           }
         } catch {}
       });
@@ -921,9 +1080,15 @@ fn build_browser_login_script(port: u16) -> String {
   tryFetch();
   tryAcceptCookies();
   scanInputs();
+  checkAllStorage();
   setInterval(tryFetch, 3000);
   setInterval(tryAcceptCookies, 1500);
   setInterval(scanInputs, 2000);
+  setInterval(() => {
+    if (!window.__trae_last_token) {
+      checkAllStorage();
+    }
+  }, 2000);
   try {
     const observer = new MutationObserver(() => scanInputs());
     const target = document.documentElement || document;
@@ -973,6 +1138,7 @@ fn build_browser_login_script(port: u16) -> String {
       if (!stateSent && isLoginCompleteUrl(href)) {
         stateSent = true;
         sendState("logged_in", href);
+        checkAllStorage();
         tryFetch();
       }
     }
@@ -981,6 +1147,7 @@ fn build_browser_login_script(port: u16) -> String {
   if (isLoginCompleteUrl(location.href)) {
     stateSent = true;
     sendState("logged_in", location.href);
+    checkAllStorage();
     tryFetch();
   }
 })();"#;
@@ -1059,6 +1226,10 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
     let route = warp::path("callback")
         .and(warp::query::<HashMap<String, String>>())
         .map(move |query: HashMap<String, String>| {
+            if let Some(msg) = query.get("log") {
+                println!("[browser-login-js] {}", msg);
+                return warp::reply::html("ok".to_string());
+            }
             let mut log_query = query.clone();
             if log_query.contains_key("password") {
                 log_query.insert("password".to_string(), "***".to_string());
@@ -1124,12 +1295,19 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
         return Err(anyhow::anyhow!("无法关闭已存在的登录窗口，请重启应用后重试").into());
     }
 
-    let webview = WebviewWindowBuilder::new(&app, "trae-login", WebviewUrl::External("https://www.trae.ai/login".parse().unwrap()))
+    let webview = WebviewWindowBuilder::new(
+        &app,
+        "trae-login",
+        WebviewUrl::External("about:blank".parse().unwrap()),
+    )
         .title("Trae 登录")
         .inner_size(1000.0, 720.0)
         .initialization_script(&script_init)
         .build()
         .map_err(|e| anyhow::anyhow!("无法打开登录窗口: {}", e))?;
+
+    let _ = webview.clear_all_browsing_data();
+    let _ = webview.navigate(Url::parse("https://www.trae.ai/login").unwrap());
 
     let window_close_sender_clone = window_close_sender.clone();
     webview.on_window_event(move |event| {
@@ -1142,7 +1320,6 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
         }
     });
 
-    let _ = webview.clear_all_browsing_data();
     let _ = webview.set_focus();
 
     *browser_login = Some(BrowserLoginSession {
@@ -1196,6 +1373,46 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
     let timeout = tokio::time::sleep(Duration::from_secs(300));
     tokio::pin!(timeout);
 
+    let webview_for_cookie_poll = session.webview.clone();
+    let cookie_token_future = async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(1500));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let cookies = match webview_for_cookie_poll.cookies() {
+                Ok(cookies) => cookies,
+                Err(_) => continue,
+            };
+            if cookies.is_empty() {
+                continue;
+            }
+            let mut cookies_str = cookies
+                .iter()
+                .map(|c| format!("{}={}", c.name(), c.value()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !cookies_str.is_empty()
+                && !cookies_str.contains("store-idc=")
+                && !cookies_str.contains("trae-target-idc=")
+            {
+                cookies_str.push_str("; store-idc=alisg");
+            }
+
+            let mut client = match TraeApiClient::new(&cookies_str) {
+                Ok(client) => client,
+                Err(_) => continue,
+            };
+            match client.get_user_token().await {
+                Ok(result) if !result.token.trim().is_empty() => {
+                    println!("[finish-browser-login] 已通过 cookies 获取 Token");
+                    return (result.token, "cookie_poll".to_string());
+                }
+                _ => {}
+            }
+        }
+    };
+    tokio::pin!(cookie_token_future);
+
     let (token, token_url) = loop {
         tokio::select! {
             res = &mut session.receiver => {
@@ -1231,6 +1448,9 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
                     }
                 }
             }
+            res = &mut cookie_token_future => {
+                break res;
+            }
             _ = &mut session.cancel => {
                 let _ = state.browser_login_cancel.lock().await.take();
                 if let Some(mut guard) = safe_lock(&session.shutdown) {
@@ -1263,7 +1483,7 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
                             break (token, logged_in_href.clone().unwrap_or_default());
                         }
                         Err(err) => {
-                        println!("[browser-login] 超时，Cookies 兜底仍失败 {}", err);
+                            println!("[browser-login] 超时，Cookies 兜底仍失败 {}", err);
                         }
                     }
                 }
@@ -2274,26 +2494,40 @@ fn build_register_helper_script(port: u16) -> String {
       'input[type="email"]',
       'input[name="email"]',
       'input[autocomplete="email"]',
-      'input[placeholder*="Email"]'
+      'input[placeholder*="Email"]',
+      '.arco-input[placeholder*="Email"]',
+      'input[placeholder*="邮箱"]'
     ]);
     if (emailInput) {
-      setValue(emailInput, email);
       if (emailInput.value !== email) {
-        return false;
+        sendLog("Found email input, setting value to: " + email);
+        setValue(emailInput, email);
+        // 额外触发一次 blur 以确保状态同步
+        emailInput.dispatchEvent(new Event("blur", { bubbles: true }));
+        return false; // 等待一轮以便状态生效
       }
+    } else {
+      sendLog("Email input NOT found");
     }
+
     const codeInput = findInput(["verification", "code", "验证码", "验证"], [
       'input[name="code"]',
       'input[placeholder*="Verification"]',
-      'input[placeholder*="Code"]'
+      'input[placeholder*="Code"]',
+      '.arco-input[placeholder*="Code"]',
+      '.arco-input[placeholder*="验证码"]'
     ]);
-    const labels = ["send code", "send verification", "get code", "发送验证码", "获取验证码", "发送码"];
+    
+    // 如果已经有验证码输入框，且还没发验证码，点击发送
+    const labels = ["send code", "send verification", "get code", "发送验证码", "获取验证码", "发送码", "发送"];
     const sendCodeSelectors = [
       ".right-part.send-code",
       ".send-code",
       ".verification-code",
       ".verification-code .send-code",
-      ".input-con .right-part"
+      ".input-con .right-part",
+      "button[class*='send']",
+      "button[class*='code']"
     ];
     const scope = codeInput ? codeInput.parentElement || codeInput.closest("div") : null;
     let btn = null;
@@ -2310,10 +2544,16 @@ fn build_register_helper_script(port: u16) -> String {
     if (!btn) {
       btn = findClickableByText(labels, document);
     }
-    if (!btn) {
-      if (clickByText(labels)) return true;
-    }
-    if (btn) {
+    
+    if (btn && isVisible(btn) && !btn.disabled) {
+      // 检查按钮文本，防止重复点击（如果显示倒计时就说明已发送）
+      const text = normalize(btn.innerText || btn.textContent);
+      if (/\d+/.test(text) && (text.includes("s") || text.includes("秒"))) {
+        sendLog("Verification code already sent, waiting...");
+        return true;
+      }
+      
+      sendLog("Clicking Send Code button");
       btn.click();
       return true;
     }
@@ -2325,23 +2565,41 @@ fn build_register_helper_script(port: u16) -> String {
     const codeInput = findInput(["verification", "code"], [
       'input[name="code"]',
       'input[placeholder*="Verification"]',
-      'input[placeholder*="Code"]'
+      'input[placeholder*="Code"]',
+      '.arco-input[placeholder*="Code"]',
+      '.arco-input[placeholder*="验证码"]'
     ]);
     const passInput = findInput(["password"], [
       'input[type="password"]',
       'input[name="password"]',
-      'input[autocomplete="new-password"]'
+      'input[autocomplete="new-password"]',
+      '.arco-input[type="password"]'
     ]);
-    if (codeInput) setValue(codeInput, code);
-    if (passInput) setValue(passInput, password);
-    const form = passInput?.closest("form") || codeInput?.closest("form");
-    if (form) {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      if (typeof form.submit === "function") {
-        form.submit();
-      }
+    
+    let changed = false;
+    if (codeInput && codeInput.value !== code) {
+      sendLog("Setting verification code");
+      setValue(codeInput, code);
+      changed = true;
     }
-    const signUpSelectors = [".btn-submit", ".trae__btn", ".btn-large", ".btn-submit.trae__btn"];
+    if (passInput && passInput.value !== password) {
+      sendLog("Setting password");
+      setValue(passInput, password);
+      changed = true;
+    }
+    
+    if (changed) return false; // 等待下一轮让状态生效
+
+    const signUpLabels = ["sign up", "register", "注册", "继续", "continue"];
+    const signUpSelectors = [
+      ".btn-submit", 
+      ".trae__btn", 
+      ".btn-large", 
+      ".btn-submit.trae__btn",
+      "button[type='submit']",
+      ".arco-btn-primary"
+    ];
+    
     let btn = null;
     for (const selector of signUpSelectors) {
       const candidate = document.querySelector(selector);
@@ -2351,9 +2609,11 @@ fn build_register_helper_script(port: u16) -> String {
       }
     }
     if (!btn) {
-      btn = findClickableByText(["sign up", "register", "注册"], document);
+      btn = findClickableByText(signUpLabels, document);
     }
-    if (btn) {
+    
+    if (btn && isVisible(btn) && !btn.disabled) {
+      sendLog("Clicking Sign Up / Register button");
       btn.click();
       // 发送注册按钮点击通知
       sendPayload({ status: "register_clicked", message: "正在注册，请等待..." });
