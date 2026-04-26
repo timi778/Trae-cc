@@ -588,6 +588,10 @@ function App() {
 
     const mode = options?.mode ?? "switch";
     const force = options?.force ?? mode === "relogin";
+    if (mode === "switch" && preserveContext) {
+      handleOpenPreserveContextSwitch(accountId);
+      return;
+    }
     const title = mode === "relogin" ? "重新登录" : "切换账号";
     const message =
       mode === "relogin"

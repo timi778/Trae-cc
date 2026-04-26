@@ -28,6 +28,7 @@ struct ExecuteResponse {
     data: Option<serde_json::Value>,
 }
 
+#[cfg(target_os = "windows")]
 fn invoke_vv_function<T: Serialize>(
     func: unsafe extern "C" fn(*const c_char) -> *mut c_char,
     request: &T,
@@ -49,12 +50,25 @@ fn invoke_vv_function<T: Serialize>(
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+fn not_supported() -> Result<bool> {
+    Err(anyhow!("Trae-vv 仅支持 Windows"))
+}
+
 pub fn execute_account_flow(
     account_id: &str,
     mode: &str,
     force: bool,
     auto_start: bool,
 ) -> Result<bool> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (account_id, mode, force, auto_start);
+        return not_supported();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
     let request = ExecuteRequest {
         account_id: account_id.to_string(),
         mode: mode.to_string(),
@@ -79,9 +93,18 @@ pub fn execute_account_flow(
             response.message
         ))
     }
+    }
 }
 
 pub fn sync_current_account(restart_if_running: bool) -> Result<bool> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = restart_if_running;
+        return not_supported();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
     let request = ControlRequest {
         action: "sync_current_account".to_string(),
         restart_if_running,
@@ -102,9 +125,17 @@ pub fn sync_current_account(restart_if_running: bool) -> Result<bool> {
             response.message
         ))
     }
+    }
 }
 
 pub fn clear_login_state() -> Result<()> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        return Err(anyhow!("Trae-vv 仅支持 Windows"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
     let request = ControlRequest {
         action: "clear_login_state".to_string(),
         restart_if_running: false,
@@ -124,9 +155,17 @@ pub fn clear_login_state() -> Result<()> {
             response.message
         ))
     }
+    }
 }
 
 pub fn read_trae_account() -> Result<Option<Account>> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        return Ok(None);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
     let request = ControlRequest {
         action: "read_trae_account".to_string(),
         restart_if_running: false,
@@ -145,5 +184,6 @@ pub fn read_trae_account() -> Result<Option<Account>> {
             response.code,
             response.message
         ))
+    }
     }
 }
