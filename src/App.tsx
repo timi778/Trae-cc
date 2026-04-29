@@ -479,12 +479,12 @@ function App() {
 
     const mode = options?.mode ?? "switch";
     const force = options?.force ?? mode === "relogin";
-    const mergeContext = options?.mergeContext ?? false;
+    const mergeContext = options?.mergeContext ?? mode === "switch";
     const title = mode === "relogin" ? "重新登录" : "切换账号";
     const message =
       mode === "relogin"
         ? `确定要重新登录账号 "${account.email || account.name}" 吗？\n\n系统将自动关闭 Trae IDE 并重新写入登录信息。`
-        : `确定要切换到账号 "${account.email || account.name}" 吗？\n\n系统将自动关闭 Trae IDE 并切换登录信息。${mergeContext ? "\n\n【对话互通模式】将合并所有账号的聊天记录。" : ""}`;
+        : `确定要切换到账号 "${account.email || account.name}" 吗？\n\n系统将自动关闭 Trae IDE 并切换登录信息。${mergeContext ? "\n\n【对话互通模式】将把上一个账号的历史对话和上下文同步到新账号中。" : ""}`;
     const infoToast = mode === "relogin" ? "正在重新登录，请稍候..." : "正在切换账号，请稍候...";
     const successToast = mode === "relogin" ? "账号重新登录完成" : "账号切换成功";
     const errorToast = mode === "relogin" ? "重新登录失败" : "切换账号失败";
@@ -499,7 +499,7 @@ function App() {
         addToast("info", infoToast);
         try {
           // 1. 获取当前活跃账号（用于备份）
-          const currentAccount = accounts.find(a => a.is_active);
+          const currentAccount = accounts.find((a) => a.is_current) ?? accounts.find((a) => a.is_active);
           console.log(`[SwitchAccount] 当前活跃账号:`, currentAccount?.id, currentAccount?.email);
           console.log(`[SwitchAccount] 目标账号ID:`, accountId);
           
@@ -521,43 +521,32 @@ function App() {
             console.log(`[SwitchAccount] 无需备份: currentAccount=${currentAccount?.id}, sameAccount=${currentAccount?.id === accountId}`);
           }
           
-          // 3. 如果启用了对话互通模式，先合并当前账号的对话到目标账号的备份
-          if (mergeContext && currentAccount && currentAccount.id !== accountId) {
-            console.log(`[SwitchAccount] 启用了对话互通模式，合并当前账号 ${currentAccount.id} 的对话到目标账号 ${accountId}...`);
-            try {
-              addToast("info", `正在合并聊天记录...`, undefined, `merge-context`);
-              await api.mergeTwoAccountsContext(currentAccount.id, accountId);
-              console.log(`[SwitchAccount] 对话合并完成，已合并到目标账号备份`);
-              addToast("success", `已合并聊天记录`);
-            } catch (mergeErr: any) {
-              console.error(`[SwitchAccount] 合并对话失败:`, mergeErr);
-              addToast("warning", `合并聊天记录失败: ${mergeErr.message}`);
-              // 合并失败不阻止切换
-            }
-          }
-          
-          // 4. 执行账号切换
+          // 3. 执行账号切换
           console.log(`[SwitchAccount] 开始执行账号切换...`);
           await api.switchAccount(accountId, { force });
           console.log(`[SwitchAccount] 账号切换完成`);
           
-          // 5. 恢复新账号的上下文（如果有备份）
-          console.log(`[SwitchAccount] 检查新账号 ${accountId} 是否有备份...`);
+          // 4. 恢复上下文
+          const restoreFromAccountId =
+            mergeContext && currentAccount && currentAccount.id !== accountId
+              ? currentAccount.id
+              : accountId;
+          console.log(`[SwitchAccount] 检查需要恢复的账号备份:`, restoreFromAccountId);
           try {
-            const hasBackup = await api.hasAccountContextBackup(accountId);
-            console.log(`[SwitchAccount] 新账号 ${accountId} 是否有备份:`, hasBackup);
+            const hasBackup = await api.hasAccountContextBackup(restoreFromAccountId);
+            console.log(`[SwitchAccount] 账号 ${restoreFromAccountId} 是否有备份:`, hasBackup);
             if (hasBackup) {
-              addToast("info", `正在恢复账号的上下文...`, undefined, `restore-${accountId}`);
-              console.log(`[SwitchAccount] 开始恢复账号 ${accountId} 的上下文...`);
-              await api.restoreAccountContext(accountId);
-              console.log(`[SwitchAccount] 已恢复账号 ${accountId} 的上下文`);
+              addToast("info", `正在恢复账号的上下文...`, undefined, `restore-${restoreFromAccountId}`);
+              console.log(`[SwitchAccount] 开始恢复账号 ${restoreFromAccountId} 的上下文...`);
+              await api.restoreAccountContext(restoreFromAccountId);
+              console.log(`[SwitchAccount] 已恢复账号 ${restoreFromAccountId} 的上下文`);
               addToast("success", `已恢复账号上下文`);
             } else {
-              console.log(`[SwitchAccount] 新账号 ${accountId} 没有备份，跳过恢复`);
+              console.log(`[SwitchAccount] 账号 ${restoreFromAccountId} 没有备份，跳过恢复`);
             }
           } catch (restoreErr: any) {
-            console.error(`[SwitchAccount] 恢复新账号上下文失败:`, restoreErr);
-            addToast("warning", `恢复新账号上下文失败: ${restoreErr.message}`);
+            console.error(`[SwitchAccount] 恢复账号上下文失败:`, restoreErr);
+            addToast("warning", `恢复账号上下文失败: ${restoreErr.message}`);
             // 恢复失败不阻止切换
           }
           

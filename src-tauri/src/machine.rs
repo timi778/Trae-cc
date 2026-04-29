@@ -977,6 +977,16 @@ pub fn backup_account_context(account_id: &str) -> Result<PathBuf> {
     let state_dst = backup_dir.join("state.vscdb");
     if state_src.exists() {
         fs::copy(&state_src, &state_dst)?;
+        let wal_src = PathBuf::from(format!("{}-wal", state_src.to_string_lossy()));
+        let wal_dst = PathBuf::from(format!("{}-wal", state_dst.to_string_lossy()));
+        if wal_src.exists() {
+            let _ = fs::copy(wal_src, wal_dst);
+        }
+        let shm_src = PathBuf::from(format!("{}-shm", state_src.to_string_lossy()));
+        let shm_dst = PathBuf::from(format!("{}-shm", state_dst.to_string_lossy()));
+        if shm_src.exists() {
+            let _ = fs::copy(shm_src, shm_dst);
+        }
     }
     
     println!("[INFO] 已备份账号 {} 的上下文数据到: {:?}", account_id, backup_dir);
@@ -1056,12 +1066,21 @@ pub fn restore_account_context(account_id: &str) -> Result<()> {
         println!("[INFO] 已恢复 globalStorage（保留当前登录信息）");
     }
     
-    // 恢复 state.vscdb（聊天记录数据库）
-    let state_src = backup_dir.join("state.vscdb");
     let state_dst = get_trae_state_db_path()?;
-    if state_src.exists() {
-        fs::copy(&state_src, &state_dst)?;
-        println!("[INFO] 已恢复 state.vscdb");
+    if !state_dst.exists() {
+        let state_src = backup_dir.join("state.vscdb");
+        if state_src.exists() {
+            fs::copy(&state_src, &state_dst)?;
+            let wal_src = backup_dir.join("state.vscdb-wal");
+            if wal_src.exists() {
+                let _ = fs::copy(&wal_src, state_dst.with_file_name("state.vscdb-wal"));
+            }
+            let shm_src = backup_dir.join("state.vscdb-shm");
+            if shm_src.exists() {
+                let _ = fs::copy(&shm_src, state_dst.with_file_name("state.vscdb-shm"));
+            }
+            println!("[INFO] 已恢复 state.vscdb");
+        }
     }
     
     println!("[INFO] 已恢复账号 {} 的上下文数据", account_id);
