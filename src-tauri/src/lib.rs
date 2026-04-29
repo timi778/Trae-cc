@@ -269,20 +269,9 @@ async fn download_and_run_installer(url: String) -> Result<String> {
             .map_err(|e| anyhow::anyhow!("无法启动安装程序: {}", e))?;
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "windows"))]
     {
-        std::process::Command::new("open")
-            .arg(&dest_path)
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("无法打开安装程序: {}", e))?;
-    }
-
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&dest_path)
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("无法打开安装程序: {}", e))?;
+        open::that(&dest_path).map_err(|e| anyhow::anyhow!("无法打开安装程序: {}", e))?;
     }
 
     Ok(dest_path.to_string_lossy().to_string())

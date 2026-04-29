@@ -5559,7 +5559,19 @@ dependencies = [
 name = "trae-vv"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "directories",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
  "serde_json",
+ "sha2",
+ "tokio",
+ "urlencoding",
+ "uuid",
+ "winreg 0.52.0",
 ]
 
 [[package]]
